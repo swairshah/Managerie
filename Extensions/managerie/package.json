@@ -1,0 +1,43 @@
+{
+  "name": "@swairshah/managerie",
+  "version": "1.2.2",
+  "description": "Text-to-speech extension for Pi coding agent using Loqui",
+  "main": "index.ts",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "tts",
+    "text-to-speech",
+    "loqui",
+    "voice"
+  ],
+  "author": "Swair Shah",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/swairshah/Loqui.git",
+    "directory": "Extensions/managerie"
+  },
+  "homepage": "https://github.com/swairshah/Loqui#readme",
+  "bugs": {
+    "url": "https://github.com/swairshah/Loqui/issues"
+  },
+  "scripts": {
+    "pack:preview": "npm pack --dry-run",
+    "publish:npm": "npm publish --access public"
+  },
+  "files": [
+    "index.ts",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": ">=0.1.0"
+  }
+}

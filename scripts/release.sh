@@ -1,0 +1,327 @@
+#!/bin/bash
+set -e
+
+# Change to project root (parent of scripts/)
+cd "$(dirname "$0")/.."
+
+# Load environment
+source ~/.env 2>/dev/null || true
+
+# Release script for Managerie
+# Usage: ./scripts/release.sh 1.0.3
+#        ./scripts/release.sh 1.0.3 --skip-notarize
+#
+# Prerequisites:
+#   - Developer ID Application certificate in keychain
+#   - App-specific password in ~/.env as APPLE_APP_PASSWORD
+#   - create-dmg: brew install create-dmg
+
+VERSION=$1
+shift || true
+
+# Configuration
+APP_NAME="Managerie"
+BUNDLE_ID="com.managerie.app"
+SIGNING_IDENTITY="Developer ID Application: Swair Rajesh Shah (8B9YURJS4G)"
+TEAM_ID="8B9YURJS4G"
+APPLE_ID="swairshah@gmail.com"
+
+# Parse flags
+SKIP_NOTARIZE=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --skip-notarize)
+            SKIP_NOTARIZE=true
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+if [ -z "$VERSION" ]; then
+    echo "Usage: ./scripts/release.sh <version>"
+    echo "Example: ./scripts/release.sh 1.0.3"
+    exit 1
+fi
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+echo -e "${GREEN}=== Managerie Release v${VERSION} ===${NC}"
+echo ""
+
+# Check prerequisites
+echo -e "${YELLOW}Checking prerequisites...${NC}"
+
+if [ "$SKIP_NOTARIZE" = false ] && [ -z "$APPLE_APP_PASSWORD" ]; then
+    echo -e "${RED}Error: APPLE_APP_PASSWORD not set in ~/.env${NC}"
+    echo "Add it or use --skip-notarize"
+    exit 1
+fi
+
+if ! command -v create-dmg &> /dev/null; then
+    echo -e "${YELLOW}Installing create-dmg...${NC}"
+    brew install create-dmg
+fi
+
+# 1. Update version in build script
+echo -e "${YELLOW}📝 Updating version...${NC}"
+sed -i '' "s/^VERSION=\"[^\"]*\"/VERSION=\"${VERSION}\"/" scripts/build-app.sh
+
+# 2. Clean previous builds
+echo -e "${YELLOW}Cleaning previous builds...${NC}"
+rm -rf dist
+mkdir -p dist
+
+# 3. Build (always universal for releases)
+echo -e "${YELLOW}🔨 Building universal binary (arm64 + x86_64)...${NC}"
+./scripts/build-app.sh --universal
+
+APP_DIR=".build/Managerie.app"
+
+# 4. Code sign the app bundle
+echo -e "${YELLOW}🔏 Signing app bundle...${NC}"
+codesign --force --options runtime \
+    --sign "$SIGNING_IDENTITY" \
+    "$APP_DIR/Contents/MacOS/mnote"
+
+if [ -f "$APP_DIR/Contents/Resources/pocket-tts-cli" ]; then
+    codesign --force --options runtime \
+        --sign "$SIGNING_IDENTITY" \
+        "$APP_DIR/Contents/Resources/pocket-tts-cli"
+fi
+
+codesign --force --deep --options runtime \
+    --sign "$SIGNING_IDENTITY" \
+    "$APP_DIR"
+
+# Verify signature
+echo -e "${YELLOW}Verifying signature...${NC}"
+codesign --verify --verbose=2 "$APP_DIR"
+spctl --assess --verbose=2 "$APP_DIR" || true
+
+if [ "$SKIP_NOTARIZE" = false ]; then
+    # 5. Notarize the app (via ZIP)
+    echo -e "${YELLOW}📦 Creating ZIP for app notarization...${NC}"
+    ditto -c -k --keepParent "$APP_DIR" ".build/$APP_NAME.zip"
+
+    echo -e "${YELLOW}📤 Submitting app for notarization...${NC}"
+    xcrun notarytool submit ".build/$APP_NAME.zip" \
+        --apple-id "$APPLE_ID" \
+        --password "$APPLE_APP_PASSWORD" \
+        --team-id "$TEAM_ID" \
+        --wait
+
+    # Staple the app
+    echo -e "${YELLOW}📎 Stapling notarization ticket to app...${NC}"
+    xcrun stapler staple "$APP_DIR"
+
+    # Verify
+    echo -e "${YELLOW}Verifying app notarization...${NC}"
+    xcrun stapler validate "$APP_DIR"
+    spctl --assess --verbose=2 "$APP_DIR"
+fi
+
+# 6. Create DMG
+echo -e "${YELLOW}📀 Creating DMG...${NC}"
+DMG_PATH="dist/${APP_NAME}-${VERSION}.dmg"
+
+# create-dmg returns non-zero on AppleScript cosmetic failures even when DMG is created
+# Use hdiutil as a fallback if create-dmg fails
+create-dmg \
+    --volname "$APP_NAME" \
+    --volicon "$APP_DIR/Contents/Resources/AppIcon.icns" \
+    --window-pos 200 120 \
+    --window-size 600 400 \
+    --icon-size 100 \
+    --icon "$APP_NAME.app" 150 190 \
+    --app-drop-link 450 185 \
+    --hide-extension "$APP_NAME.app" \
+    --skip-jenkins \
+    "$DMG_PATH" \
+    "$APP_DIR" \
+    2>&1 || true
+
+if [ ! -f "$DMG_PATH" ]; then
+    echo -e "${YELLOW}create-dmg failed, falling back to hdiutil...${NC}"
+    STAGING_DIR=$(mktemp -d)
+    cp -R "$APP_DIR" "$STAGING_DIR/"
+    ln -s /Applications "$STAGING_DIR/Applications"
+    hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING_DIR" \
+        -ov -format UDZO "$DMG_PATH"
+    rm -rf "$STAGING_DIR"
+fi
+
+if [ ! -f "$DMG_PATH" ]; then
+    echo -e "${RED}Error: DMG creation failed${NC}"
+    exit 1
+fi
+
+# 7. Sign the DMG
+echo -e "${YELLOW}🔏 Signing DMG...${NC}"
+codesign --force --sign "$SIGNING_IDENTITY" "$DMG_PATH"
+
+if [ "$SKIP_NOTARIZE" = false ]; then
+    # 8. Notarize the DMG
+    echo -e "${YELLOW}📤 Submitting DMG for notarization...${NC}"
+    xcrun notarytool submit "$DMG_PATH" \
+        --apple-id "$APPLE_ID" \
+        --password "$APPLE_APP_PASSWORD" \
+        --team-id "$TEAM_ID" \
+        --wait
+
+    # 9. Staple the DMG
+    echo -e "${YELLOW}📎 Stapling notarization ticket to DMG...${NC}"
+    xcrun stapler staple "$DMG_PATH"
+
+    # Verify
+    echo -e "${YELLOW}Verifying DMG notarization...${NC}"
+    xcrun stapler validate "$DMG_PATH"
+    spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG_PATH" || true
+else
+    echo -e "${YELLOW}Skipping notarization (--skip-notarize)${NC}"
+fi
+
+# 10. Also create managerie extension zip
+echo -e "${YELLOW}📦 Packaging managerie extension...${NC}"
+zip -j dist/managerie-${VERSION}.zip Extensions/managerie/index.ts Extensions/managerie/package.json Extensions/managerie/README.md 2>/dev/null || true
+
+# 11. Package optional local model asset (downloaded on demand from same release)
+MODELS_DIR="Resources/models"
+if [ ! -d "$MODELS_DIR" ] || [ ! -f "$MODELS_DIR/tts_b6369a24.safetensors" ]; then
+    if [ -d "../Loqui/Resources/models" ] && [ -f "../Loqui/Resources/models/tts_b6369a24.safetensors" ]; then
+        MODELS_DIR="../Loqui/Resources/models"
+    fi
+fi
+
+MODEL_ZIP="dist/Managerie-models-${VERSION}.zip"
+if [ -d "$MODELS_DIR" ] && [ -f "$MODELS_DIR/tts_b6369a24.safetensors" ]; then
+    echo -e "${YELLOW}📦 Packaging local model asset...${NC}"
+    STAGE_DIR=$(mktemp -d)
+    mkdir -p "$STAGE_DIR/models/embeddings"
+    cp "$MODELS_DIR/tts_b6369a24.safetensors" "$STAGE_DIR/models/" 2>/dev/null || true
+    cp "$MODELS_DIR/tokenizer.model" "$STAGE_DIR/models/" 2>/dev/null || true
+
+    if [ -d "$MODELS_DIR/embeddings" ]; then
+        cp "$MODELS_DIR/embeddings/"*.safetensors "$STAGE_DIR/models/embeddings/" 2>/dev/null || true
+    else
+        for voice_file in "$MODELS_DIR"/*.safetensors; do
+            [ -e "$voice_file" ] || continue
+            base_name="$(basename "$voice_file")"
+            if [ "$base_name" != "tts_b6369a24.safetensors" ]; then
+                cp "$voice_file" "$STAGE_DIR/models/embeddings/" 2>/dev/null || true
+            fi
+        done
+    fi
+
+    (cd "$STAGE_DIR" && zip -qr "$OLDPWD/$MODEL_ZIP" models)
+    rm -rf "$STAGE_DIR"
+    echo -e "   Created ${GREEN}$MODEL_ZIP${NC}"
+else
+    echo -e "${YELLOW}⚠ Skipping model asset: no model files found in Resources/models or ../Loqui/Resources/models${NC}"
+fi
+
+# 12. Calculate SHA for Homebrew
+echo ""
+SHA=$(shasum -a 256 "$DMG_PATH" | cut -d' ' -f1)
+echo -e "📋 SHA256: ${GREEN}$SHA${NC}"
+
+# 13. Update Homebrew cask
+CASK_FILE=~/work/projects/homebrew-tap/Casks/managerie.rb
+if [ -f "$CASK_FILE" ]; then
+    echo -e "${YELLOW}📝 Updating Homebrew cask...${NC}"
+    sed -i '' "s/version \"[^\"]*\"/version \"${VERSION}\"/" "$CASK_FILE"
+    sed -i '' "s/sha256 \"[^\"]*\"/sha256 \"${SHA}\"/" "$CASK_FILE"
+    echo -e "   Updated ${GREEN}$CASK_FILE${NC}"
+fi
+
+echo ""
+echo -e "${GREEN}=== Release Build Complete ===${NC}"
+echo ""
+ls -lh "$DMG_PATH"
+echo ""
+
+# 14. Git commit, tag, and push
+echo -e "${YELLOW}📌 Git tagging...${NC}"
+echo ""
+
+# Check for uncommitted changes to build-app.sh
+if git diff --quiet scripts/build-app.sh 2>/dev/null; then
+    echo "   Version already committed"
+else
+    echo -n "   Commit version bump? [Y/n] "
+    read -r COMMIT_CONFIRM
+    if [[ ! "$COMMIT_CONFIRM" =~ ^[Nn]$ ]]; then
+        git add scripts/build-app.sh
+        git commit -m "Bump version to ${VERSION}"
+        echo -e "   ${GREEN}✓ Committed version bump${NC}"
+    fi
+fi
+
+# Check if tag already exists
+if git rev-parse "v${VERSION}" >/dev/null 2>&1; then
+    echo -e "   ${YELLOW}Tag v${VERSION} already exists${NC}"
+else
+    echo -n "   Create and push tag v${VERSION}? [Y/n] "
+    read -r TAG_CONFIRM
+    if [[ ! "$TAG_CONFIRM" =~ ^[Nn]$ ]]; then
+        git tag -a "v${VERSION}" -m "Release v${VERSION}"
+        git push origin main
+        git push origin "v${VERSION}"
+        echo -e "   ${GREEN}✓ Created and pushed tag v${VERSION}${NC}"
+    fi
+fi
+
+# 15. Create GitHub release
+echo ""
+if command -v gh &> /dev/null; then
+    # Check if release already exists
+    if gh release view "v${VERSION}" &>/dev/null; then
+        echo -e "   ${YELLOW}GitHub release v${VERSION} already exists${NC}"
+    else
+        echo -n "   Create GitHub release? [Y/n] "
+        read -r GH_CONFIRM
+        if [[ ! "$GH_CONFIRM" =~ ^[Nn]$ ]]; then
+            RELEASE_ASSETS=("dist/Managerie-${VERSION}.dmg")
+            [ -f "dist/managerie-${VERSION}.zip" ] && RELEASE_ASSETS+=("dist/managerie-${VERSION}.zip")
+            [ -f "dist/Managerie-models-${VERSION}.zip" ] && RELEASE_ASSETS+=("dist/Managerie-models-${VERSION}.zip")
+            
+            gh release create "v${VERSION}" \
+                "${RELEASE_ASSETS[@]}" \
+                --title "Managerie v${VERSION}" \
+                --generate-notes
+            echo -e "   ${GREEN}✓ Created GitHub release${NC}"
+        fi
+    fi
+else
+    echo -e "   ${YELLOW}gh CLI not installed, skipping GitHub release${NC}"
+    echo -e "   Install with: brew install gh"
+fi
+
+# 16. Push Homebrew tap
+echo ""
+if [ -f "$CASK_FILE" ]; then
+    echo -n "   Push Homebrew tap update? [Y/n] "
+    read -r BREW_CONFIRM
+    if [[ ! "$BREW_CONFIRM" =~ ^[Nn]$ ]]; then
+        (
+            cd ~/work/projects/homebrew-tap
+            git add Casks/managerie.rb
+            git commit -m "Update managerie to ${VERSION}" 2>/dev/null || echo "   (no changes to commit)"
+            git push
+        )
+        echo -e "   ${GREEN}✓ Pushed Homebrew tap${NC}"
+    fi
+fi
+
+echo ""
+echo -e "${GREEN}=== Release v${VERSION} Complete ===${NC}"
+echo ""
+echo -e "Test the release: ${GREEN}open $DMG_PATH${NC}"
+echo ""
