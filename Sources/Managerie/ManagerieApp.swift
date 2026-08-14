@@ -174,7 +174,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in
             // Let the menu bar item settle before stacking a system dialog.
             try? await Task.sleep(nanoseconds: 1_200_000_000)
+
+            // 1. Microphone — modal, returns once the user answers.
             _ = await PermissionsManager.requestMicrophone()
+
+            // 2. Accessibility — needed to focus terminals and inject replies.
+            //    AXIsProcessTrustedWithOptions is what registers Managerie in
+            //    System Settings > Privacy & Security > Accessibility; without
+            //    this call the app is absent from that list entirely. Wait a
+            //    beat so it doesn't land on top of the microphone dialog.
+            if PermissionsManager.checkAccessibility() != .granted {
+                try? await Task.sleep(nanoseconds: 700_000_000)
+                PermissionsManager.requestAccessibility()
+            }
+
             openSettings(pane: .permissions)
         }
     }
