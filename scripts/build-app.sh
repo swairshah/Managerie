@@ -5,7 +5,7 @@ set -e
 cd "$(dirname "$0")/.."
 
 # Version - update this for releases
-VERSION="2.0.0"
+VERSION="2.0.1"
 
 echo "🔨 Building Managerie.app v$VERSION..."
 
