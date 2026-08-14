@@ -126,10 +126,10 @@ final class VoiceMonitor: ObservableObject {
         guard let appDelegate = AppDelegate.shared else { return }
         if enabled {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                appDelegate.startLocalBroker()
+                appDelegate.startEventSpool()
             }
         } else {
-            appDelegate.stopLocalBroker()
+            appDelegate.stopEventSpool()
         }
     }
 

@@ -184,7 +184,7 @@ struct StatusBarContentView: View {
             .toggleStyle(.switch)
             .controlSize(.mini)
             .labelsHidden()
-            .help(monitor.serverEnabled ? "Broker is running — agents can reach Managerie" : "Broker is stopped")
+            .help(monitor.serverEnabled ? "Listening — agents can reach Managerie" : "Paused — agent events wait in the spool")
         }
     }
 
@@ -583,7 +583,7 @@ struct StatusBarIcon: View {
 
     var body: some View {
         Image(nsImage: menuBarImage)
-            .help(!serverEnabled ? "Broker is stopped" : (serverOnline ? summary.label : "Broker offline"))
+            .help(!serverEnabled ? "Paused" : (serverOnline ? summary.label : "Offline"))
     }
 
     private var menuBarImage: NSImage {

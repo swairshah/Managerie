@@ -1,12 +1,17 @@
-# Managerie IPC Design (Broker)
+# Managerie IPC Design (Event Spool)
 
-Managerie ingests agent events through two transports:
+Managerie ingests agent events through a single port-free transport:
 
-- **File spool (primary)** — NDJSON files dropped into `~/.pi/agent/managerie/events/`.
-  No ports, no races. Events written while the app is closed are delivered on
-  its next launch.
-- **TCP broker (compat)** — `127.0.0.1:18091`, NDJSON over TCP (one JSON object
-  per line), for existing clients.
+- **File spool** — NDJSON files dropped into `~/.pi/agent/managerie/events/`.
+  Writers create `<name>.json.tmp` and rename to `<name>.json` (atomic, so the
+  app never reads half-written files). The app watches the directory, ingests
+  each file, and deletes it. Events written while the app is closed are
+  delivered on its next launch.
+- **Presence** — the app touches `~/.pi/agent/managerie/app.alive` every 10s;
+  agents check its mtime (< 30s = running) instead of polling an HTTP endpoint.
+
+There are no TCP ports. The legacy broker (18091/18081) and HTTP health server
+(18090) were removed once all integrations moved to the spool.
 
 For remote iOS/WebSocket control, see `docs/REMOTE_WS_PROTOCOL.md`.
 
@@ -31,19 +36,10 @@ Fields:
 - `sessionId` (optional)
 - `pid` (optional) — used to jump to the originating terminal session
 
-### health
+### health / stop
 
-```json
-{"type":"health"}
-```
-
-### stop
-
-Accepted and acknowledged, but a no-op — retained so older clients don't error.
-
-```json
-{"type":"stop"}
-```
+Accepted and ignored — retained so older clients don't error. Presence is
+signalled via the `app.alive` heartbeat file instead.
 
 ### status
 
@@ -68,9 +64,9 @@ To remove an agent (e.g. on shutdown):
 
 ## Response shape
 
-Responses are JSON lines and can include:
-- `ok`
-- `error`
+The spool is one-way; event files are not acknowledged. (The internal
+processing pipeline still produces ok/error results, used by the WebSocket
+remote transport.)
 
 ## Notification behavior
 

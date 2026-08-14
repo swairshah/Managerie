@@ -47,11 +47,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // Menu bar UI is handled by SwiftUI MenuBarExtra
     var settingsWindow: NSWindow?
-    var localBroker: LocalSpeechBroker?
-    var legacyBroker: LocalSpeechBroker?
-    private var legacyBrokerRetryTimer: Timer?
-    let brokerPort = 18091
-    let legacyBrokerPort = 18081  // old PiTalk port (compat)
 
     // Dock icon visibility (defaults to true so window is accessible)
     var showDockIcon: Bool {
@@ -94,11 +89,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Notification-first: register categories + request authorization.
         AgentNotificationManager.shared.setup()
 
-        // Only start broker if server is enabled
+        // Only start event ingestion if the server toggle is enabled
         if serverEnabled {
-            startLocalBroker()
+            startEventSpool()
         } else {
-            debugLog("Managerie: Server disabled, broker not started")
+            debugLog("Managerie: Server disabled, event spool not started")
         }
 
         // Start remote runtime (WebSocket control API for companion iOS app).
@@ -160,7 +155,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         remoteRuntime?.stop()
         eventSpool?.stop()
-        localBroker?.stop()
         KeyboardShortcutManager.shared.unregisterAll()
     }
 
@@ -191,89 +185,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         debugLog("Managerie: Could not find status bar button to toggle")
     }
 
-    var healthServer: HealthHTTPServer?
     var remoteRuntime: ManagerieRemoteRuntime?
     var eventSpool: EventSpoolWatcher?
 
-    func startLocalBroker() {
-        debugLog("Managerie: startLocalBroker called, localBroker=\(localBroker != nil)")
-
-        // Primary transport: the file event spool. No ports involved — this
-        // works even if every TCP port below is taken by another process.
-        if eventSpool == nil {
-            let processor = BrokerRequestProcessor()
-            let spool = EventSpoolWatcher { line in
-                _ = processor.process(line)
-            }
-            spool.start()
-            eventSpool = spool
-            debugLog("Managerie: Event spool watching \(EventSpool.eventsDir.path)")
-        }
-
-        // Don't start if already running
-        if localBroker != nil {
-            debugLog("Managerie: Broker already running, skipping start")
+    /// The only local transport: the file event spool. No ports, no sockets —
+    /// this works even if every TCP port on the machine is taken, and events
+    /// written while the app is closed are delivered on the next launch.
+    func startEventSpool() {
+        guard eventSpool == nil else {
+            debugLog("Managerie: Event spool already running, skipping start")
             return
         }
-
-        do {
-            let broker = try LocalSpeechBroker(port: brokerPort)
-            broker.start()
-            localBroker = broker
-            debugLog("Managerie: Local broker listening on 127.0.0.1:\(brokerPort)")
-        } catch {
-            print("Managerie: Failed to start local broker: \(error)")
-            return
+        let processor = BrokerRequestProcessor()
+        let spool = EventSpoolWatcher { line in
+            _ = processor.process(line)
         }
-
-        // Also start HTTP health server on 18090
-        if healthServer == nil {
-            do {
-                let server = try HealthHTTPServer(port: 18090)
-                server.start()
-                healthServer = server
-                debugLog("Managerie: Health server listening on 127.0.0.1:18090")
-            } catch {
-                print("Managerie: Failed to start health server: \(error)")
-            }
-        }
-
-        // Legacy compat: adopt the old PiTalk port (18081) so sessions still
-        // running the old pi-talk extension flow into Managerie. If the old
-        // PiTalk app holds the port, retry periodically — the moment it quits,
-        // Managerie takes over.
-        startLegacyBrokerIfAvailable()
-        if legacyBrokerRetryTimer == nil {
-            legacyBrokerRetryTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-                guard let self, self.localBroker != nil, self.legacyBroker == nil else { return }
-                self.startLegacyBrokerIfAvailable()
-            }
-        }
+        spool.start()
+        eventSpool = spool
+        debugLog("Managerie: Event spool watching \(EventSpool.eventsDir.path)")
     }
 
-    private func startLegacyBrokerIfAvailable() {
-        guard legacyBroker == nil else { return }
-        do {
-            let broker = try LocalSpeechBroker(port: legacyBrokerPort)
-            broker.start()
-            legacyBroker = broker
-            debugLog("Managerie: Legacy broker listening on 127.0.0.1:\(legacyBrokerPort) (pi-talk compat)")
-        } catch {
-            debugLog("Managerie: Legacy port \(legacyBrokerPort) unavailable (old PiTalk still running?)")
-        }
-    }
-
-    func stopLocalBroker() {
-        debugLog("Managerie: stopLocalBroker called, localBroker=\(localBroker != nil)")
+    func stopEventSpool() {
         eventSpool?.stop()
         eventSpool = nil
-        localBroker?.stop()
-        localBroker = nil
-        legacyBroker?.stop()
-        legacyBroker = nil
-        healthServer?.stop()
-        healthServer = nil
-        debugLog("Managerie: Broker and health server stopped")
+        debugLog("Managerie: Event spool stopped")
     }
 
     @objc func toggleDockIcon() {
@@ -733,109 +668,6 @@ final class BrokerRequestProcessor {
         default:
             return .failure("Unknown command: \(request.type)")
         }
-    }
-}
-
-final class LocalSpeechBroker {
-    private let listener: NWListener
-    private let queue = DispatchQueue(label: "managerie.local.broker")
-    private let encoder = JSONEncoder()
-    private let processor: BrokerRequestProcessor
-
-    init(port: Int) throws {
-        guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
-            throw NSError(domain: "Managerie", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid broker port: \(port)"])
-        }
-
-        let params = NWParameters.tcp
-        params.allowLocalEndpointReuse = true
-        self.listener = try NWListener(using: params, on: nwPort)
-        self.processor = BrokerRequestProcessor()
-    }
-
-    func start() {
-        listener.newConnectionHandler = { [weak self] connection in
-            self?.handle(connection: connection)
-        }
-
-        listener.stateUpdateHandler = { state in
-            switch state {
-            case .ready:
-                break
-            case .failed(let error):
-                print("Managerie: Broker failed: \(error)")
-            default:
-                break
-            }
-        }
-
-        listener.start(queue: queue)
-    }
-
-    func stop() {
-        debugLog("Managerie: LocalSpeechBroker.stop() - cancelling listener")
-        listener.newConnectionHandler = nil
-        listener.cancel()
-    }
-
-    private func handle(connection: NWConnection) {
-        connection.start(queue: queue)
-        receive(on: connection, buffer: Data())
-    }
-
-    private func receive(on connection: NWConnection, buffer: Data) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
-            guard let self else {
-                connection.cancel()
-                return
-            }
-
-            if let error {
-                self.send(response: .failure("Connection error: \(error.localizedDescription)"), on: connection)
-                return
-            }
-
-            var newBuffer = buffer
-            if let data {
-                newBuffer.append(data)
-            }
-
-            if let range = newBuffer.range(of: Data([0x0A])) {
-                let line = newBuffer.subdata(in: 0..<range.lowerBound)
-                self.handleLine(line, on: connection)
-                return
-            }
-
-            if isComplete {
-                self.handleLine(newBuffer, on: connection)
-                return
-            }
-
-            self.receive(on: connection, buffer: newBuffer)
-        }
-    }
-
-    private func handleLine(_ line: Data, on connection: NWConnection) {
-        send(response: processor.process(line), on: connection)
-    }
-
-    private func send(response: BrokerResponse, on connection: NWConnection) {
-        let payload: Data
-        do {
-            var data = try encoder.encode(response)
-            data.append(0x0A)
-            payload = data
-        } catch {
-            let fallback = "{\"ok\":false,\"error\":\"Encoding failed\"}\n"
-            connection.send(content: fallback.data(using: .utf8), completion: .contentProcessed { _ in
-                connection.cancel()
-            })
-            return
-        }
-
-        connection.send(content: payload, completion: .contentProcessed { _ in
-            connection.cancel()
-        })
     }
 }
 
@@ -1791,9 +1623,8 @@ struct HelpView: View {
                         CodeRow(code: "~/.pi/agent/managerie/events/", description: "Drop NDJSON event files here")
                         CodeRow(code: "{\"type\":\"speak\",\"text\":\"Hi\",\"sourceApp\":\"claude-code\",\"pid\":123}", description: "Send a notification")
                         CodeRow(code: "{\"type\":\"status\",\"status\":\"working\",\"pid\":123}", description: "Live session status")
-                        CodeRow(code: "{\"type\":\"stop\"}", description: "Stop and clear playback queue")
                         CodeRow(code: "~/.pi/agent/managerie/app.alive", description: "App heartbeat — mtime < 30s means running")
-                        Text("Events sent while the app is closed are delivered on next launch. Legacy TCP (18091, 18081) stays available for old sessions.")
+                        Text("Events sent while the app is closed are delivered on next launch.")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -2167,111 +1998,5 @@ struct SettingsCard<Content: View>: View {
             RoundedRectangle(cornerRadius: 10)
                 .stroke(Color.secondary.opacity(0.1), lineWidth: 1)
         )
-    }
-}
-
-// MARK: - HTTP Health Server
-
-/// Simple HTTP server that responds to the /health endpoint.
-final class HealthHTTPServer {
-    private let listener: NWListener
-    private let queue = DispatchQueue(label: "managerie.health.server")
-
-    init(port: Int) throws {
-        guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
-            throw NSError(
-                domain: "Managerie",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "Invalid health server port: \(port)"]
-            )
-        }
-
-        let params = NWParameters.tcp
-        params.allowLocalEndpointReuse = true
-
-        self.listener = try NWListener(using: params, on: nwPort)
-    }
-
-    func start() {
-        listener.newConnectionHandler = { [weak self] connection in
-            self?.handleConnection(connection)
-        }
-
-        listener.stateUpdateHandler = { state in
-            switch state {
-            case .ready:
-                debugLog("Managerie: Health HTTP server ready")
-            case .failed(let error):
-                print("Managerie: Health HTTP server failed: \(error)")
-            default:
-                break
-            }
-        }
-
-        listener.start(queue: queue)
-    }
-
-    func stop() {
-        listener.cancel()
-    }
-
-    private func handleConnection(_ connection: NWConnection) {
-        connection.start(queue: queue)
-
-        // Read HTTP request
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] data, _, _, error in
-            guard error == nil, let data = data else {
-                connection.cancel()
-                return
-            }
-
-            self?.handleRequest(data, on: connection)
-        }
-    }
-
-    private func handleRequest(_ data: Data, on connection: NWConnection) {
-        guard let request = String(data: data, encoding: .utf8) else {
-            connection.cancel()
-            return
-        }
-
-        // Parse HTTP request line
-        let lines = request.components(separatedBy: "\r\n")
-        guard let requestLine = lines.first else {
-            connection.cancel()
-            return
-        }
-
-        let parts = requestLine.components(separatedBy: " ")
-        let path = parts.count > 1 ? parts[1] : "/"
-
-        let response: String
-        if path == "/health" || path == "/" {
-            // Health check - return 200 OK with JSON
-            let body = "{\"ok\":true,\"service\":\"Managerie\"}"
-            response = """
-            HTTP/1.1 200 OK\r
-            Content-Type: application/json\r
-            Content-Length: \(body.count)\r
-            Connection: close\r
-            \r
-            \(body)
-            """
-        } else {
-            // 404 for other paths
-            let body = "Not Found"
-            response = """
-            HTTP/1.1 404 Not Found\r
-            Content-Type: text/plain\r
-            Content-Length: \(body.count)\r
-            Connection: close\r
-            \r
-            \(body)
-            """
-        }
-
-        connection.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in
-            connection.cancel()
-        })
     }
 }

@@ -2,7 +2,7 @@
 
 Managerie is a macOS menu bar app that keeps your menagerie of coding agents in one place — Pi, Codex, Claude Code, or any other local agent.
 
-Agents send messages to Managerie's local broker; Managerie surfaces them as macOS notifications, tracks live agent status in the menu bar, lets you **jump** straight to any agent's terminal session, and lets you **dictate** replies (speech → text) into a session.
+Agents send messages to Managerie's port-free file event spool; Managerie surfaces them as macOS notifications, tracks live agent status in the menu bar, lets you **jump** straight to any agent's terminal session, and lets you **dictate** replies (speech → text) into a session.
 
 | Managerie macOS menu bar app | Managerie iOS companion app |
 |---|---|
@@ -20,7 +20,7 @@ brew tap swairshah/tap
 brew install --cask swairshah/tap/managerie
 ```
 
-Then launch Managerie from Applications (or via Spotlight) and start sending broker requests.
+Then launch Managerie from Applications (or via Spotlight) — agent integrations connect automatically.
 
 ### Pi extensions
 
@@ -33,28 +33,39 @@ pi install npm:@jademind/pi-telemetry
 
 ## What this app does
 
-- Runs a local agent broker on `127.0.0.1:18091` (NDJSON over TCP)
-- Accepts `speak` (message), `status`, `health`, and `stop` commands from any local client
+- Ingests agent events from a port-free file spool (`~/.pi/agent/managerie/events/`, NDJSON files)
+- Accepts `speak` (message) and `status` events from any local client — no ports, no sockets; events sent while the app is closed are delivered on next launch
 - **Notification-first**: agent messages appear in Notification Center — click one to jump to that agent's terminal session
 - Shows live agent status in the menu bar (thinking / editing / running / waiting …)
 - **Jump**: focuses the right terminal window/pane for a session (Ghostty, iTerm2, Terminal, tmux, zellij)
 - **Dictate**: record audio, transcribe on-device (Apple Speech), and send it into an agent session
-- Keeps request history (queued / notified / played / interrupted / failed)
+- Keeps request history (queued / notified / failed)
 - Optional remote WebSocket control API for iOS/phone clients (`ws://<host>:18092/ws`)
 
 ## Use it as an agent hub (from any app)
 
-Example broker call:
+Send an event by dropping an NDJSON file into the spool (write to a `.tmp`
+name, then rename — the app never reads half-written files):
 
 ```bash
-echo '{"type":"speak","text":"Hello from another app","sourceApp":"my-app","sessionId":"abc-123"}' | nc 127.0.0.1 18091
+d=~/.pi/agent/managerie/events
+f=$(python3 -c 'import time,os; print(f"{int(time.time()*1000):013d}-{os.getpid()}-x.json")')
+echo '{"type":"speak","text":"Hello from another app","sourceApp":"my-app","sessionId":"abc-123"}' > "$d/.$f.tmp" && mv "$d/.$f.tmp" "$d/$f"
 ```
 
-Health check:
+Or just use the bundled CLI:
 
 ```bash
-echo '{"type":"health"}' | nc 127.0.0.1 18091
+mnote "Hello from another app"
 ```
+
+Is the app running? Check the heartbeat file's mtime (< 30s = alive):
+
+```bash
+stat -f %m ~/.pi/agent/managerie/app.alive
+```
+
+Full protocol: `docs/IPC.md`.
 
 ## Remote control API (WebSocket)
 
@@ -90,7 +101,7 @@ Protocol docs:
 ## Pi-specific pieces in this repo
 
 - **`Extensions/managerie`** - forwards Pi messages, live status, and inbox replies to Managerie
-- **`Sources/Managerie`** - menu bar app + broker + notification pipeline
+- **`Sources/Managerie`** - menu bar app + event spool + notification pipeline
 - **`Sources/mnote`** - CLI client for sending notifications
 - **`apps/managerie-ios`** - iPhone companion app scaffold (WebSocket client + session UI)
 

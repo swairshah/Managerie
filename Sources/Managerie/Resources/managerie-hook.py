@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Managerie agent hook — forwards agent events to the Managerie broker.
+"""Managerie agent hook — forwards agent events to the Managerie app.
 
 Usage:
   managerie-hook.py claude-stop          Claude Code Stop hook (JSON on stdin)
@@ -9,7 +9,7 @@ Usage:
 
 Drops NDJSON `speak` events into Managerie's file spool
 (~/.pi/agent/managerie/events/) — no ports, no sockets. Managerie watches the
-directory and surfaces events as macOS notifications (and optional TTS).
+directory and surfaces events as macOS notifications.
 Events written while the app is closed are delivered on its next launch.
 """
 import json

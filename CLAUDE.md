@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Managerie is a macOS menu bar application that acts as a notification hub for local coding agents (Pi, Codex, Claude Code, …). Agents send messages/status to Managerie (file spool primary, TCP broker for compat); Managerie surfaces messages as macOS user notifications (click → jump to the agent's terminal session), shows live agent status, and supports dictation (speech→text) into sessions.
+Managerie is a macOS menu bar application that acts as a notification hub for local coding agents (Pi, Codex, Claude Code, …). Agents send messages/status to Managerie via a port-free file event spool; Managerie surfaces messages as macOS user notifications (click → jump to the agent's terminal session), shows live agent status, and supports dictation (speech→text) into sessions.
 
-**There is no text-to-speech.** TTS was removed entirely — no providers, no audio playback, no `ffplay`. Dictation is the only speech feature and runs on Apple's on-device recognizer, so the app needs no API keys at all. The broker verb is still named `speak` purely for wire compatibility with installed hooks/extensions; it means "deliver this message".
+**There is no text-to-speech.** TTS was removed entirely — no providers, no audio playback, no `ffplay`. Dictation is the only speech feature and runs on Apple's on-device recognizer, so the app needs no API keys at all. The event verb is still named `speak` purely for wire compatibility with installed hooks/extensions; it means "deliver this message".
 
 ## Build & Run Commands
 
@@ -31,10 +31,9 @@ There are no tests or linter configured.
 ### Core Components (all in `ManagerieApp.swift` ~2600 lines)
 
 - **ManagerieApp** (`@main`) — SwiftUI app entry point with MenuBarExtra
-- **AppDelegate** — Sets up global Cmd+. hotkey (Carbon), owns the coordinator, broker, mic monitor, health server. Singleton via `AppDelegate.shared`
-- **LocalSpeechBroker** — TCP server on port 18091 (NWListener). Accepts NDJSON commands: `speak`, `health`, `stop` (no-op), `status`
-- **BrokerRequestProcessor** — Shared pipeline for both transports. `deliver()` records history + posts the notification
-- **HealthHTTPServer** — HTTP server on port 18090, returns `{"ok":true}` at `/health`
+- **AppDelegate** — Owns the event spool watcher and remote runtime, sets up hotkeys. Singleton via `AppDelegate.shared`
+- **EventSpoolWatcher** (`EventSpool.swift`) — watches `~/.pi/agent/managerie/events/` for NDJSON event files (`speak`, `status`; `health`/`stop` accepted as no-ops) and maintains the `app.alive` heartbeat file
+- **BrokerRequestProcessor** — Shared processing pipeline (spool + WebSocket remote). `deliver()` records history + posts the notification
 - **RequestHistoryStore** — Singleton, persists to `~/Library/Application Support/Managerie/request-history.json` (max 250 entries)
 - All SwiftUI views (Settings, Sessions, History, About) are also in this file
 
@@ -57,16 +56,9 @@ TypeScript npm package (`@swairshah/managerie`) for the Pi coding agent. Forward
 - **AgentNotificationManager** (`NotificationManager.swift`) — posts UNUserNotifications for agent messages; notification tap / "Jump to Session" action calls `JumpHandler.jump(to:)`. Banner visibility honours `notificationsEnabled` + `notifyOnlyWhenIdle`; the chime is independent (`notificationChimeEnabled`)
 - `LSUIElement=true` — menu bar app, dock icon is toggleable
 - App bundle ID: `com.managerie.app`
-- Flow: `speak` event (spool or TCP) → history entry → notification
+- Flow: `speak` event (spool) → history entry → notification
 - Requires Accessibility permission for terminal focusing, Microphone + Speech Recognition for dictation
 
-## Network Ports
+## IPC
 
-| Port  | Protocol   | Purpose                        |
-|-------|------------|--------------------------------|
-| 18090 | HTTP       | Health check server            |
-| 18091 | TCP/NDJSON | Agent broker (speak/status/health) |
-
-## IPC Protocol
-
-Broker protocol documented in `docs/IPC.md`. NDJSON over TCP on port 18091.
+No local TCP ports — agent ingestion is entirely file-based (spool + `app.alive` heartbeat), documented in `docs/IPC.md`. The only network listener is the optional WebSocket remote for the iOS companion app (`docs/REMOTE_WS_PROTOCOL.md`).
