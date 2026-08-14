@@ -6,28 +6,35 @@ Usage:
   managerie-hook.py claude-notification  Claude Code Notification hook (JSON on stdin)
   managerie-hook.py codex [json]         Codex notify program (JSON as final arg)
 
-Sends NDJSON `speak` commands to the Managerie broker on 127.0.0.1:18091.
-Managerie surfaces them as macOS notifications (and optional TTS).
+Drops NDJSON `speak` events into Managerie's file spool
+(~/.pi/agent/managerie/events/) — no ports, no sockets. Managerie watches the
+directory and surfaces events as macOS notifications (and optional TTS).
+Events written while the app is closed are delivered on its next launch.
 """
 import json
 import os
-import socket
 import sys
+import time
+import uuid
 
-PORT = 18091
+SPOOL_DIR = os.path.expanduser("~/.pi/agent/managerie/events")
 
 
 def send(obj):
     try:
-        s = socket.create_connection(("127.0.0.1", PORT), timeout=1.5)
-        s.sendall((json.dumps(obj) + "\n").encode())
-        try:
-            s.recv(4096)
-        except Exception:
-            pass
-        s.close()
+        os.makedirs(SPOOL_DIR, exist_ok=True)
+        # Zero-padded ms timestamp keeps lexicographic order == arrival order.
+        name = "%013d-%d-%s.json" % (
+            time.time_ns() // 1_000_000,
+            os.getpid(),
+            uuid.uuid4().hex[:6],
+        )
+        tmp = os.path.join(SPOOL_DIR, ".%s.tmp" % name)
+        with open(tmp, "w") as f:
+            f.write(json.dumps(obj) + "\n")
+        os.replace(tmp, os.path.join(SPOOL_DIR, name))  # atomic publish
     except Exception:
-        pass  # Managerie not running — never block the agent
+        pass  # never block the agent
 
 
 def clip(text, limit=400):

@@ -166,7 +166,7 @@ struct StatusBarContentView: View {
                 .renderingMode(.template)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
-                .frame(height: 13)
+                .frame(height: 22)
                 .foregroundStyle(.primary)
 
             Text("Managerie")
@@ -601,7 +601,7 @@ struct StatusBarIcon: View {
 
         // Template rendering: macOS adapts the glyph to menubar appearance.
         image.isTemplate = true
-        let pointHeight: CGFloat = 18
+        let pointHeight: CGFloat = 20
         let aspect = image.size.height > 0 ? image.size.width / image.size.height : 1
         image.size = NSSize(width: (pointHeight * aspect).rounded(), height: pointHeight)
         return image

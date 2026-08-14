@@ -1,5 +1,4 @@
 import Foundation
-import Network
 import ManagerieClient
 
 /// mnote - Managerie command line interface
@@ -144,140 +143,50 @@ func parseArgs() -> CLI {
     return cli
 }
 
-func sendBrokerCommand(host: String, port: Int, request: BrokerRequest, timeout: TimeInterval = 3.0) async throws -> BrokerResponse {
-    guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
-        throw TTSError.serverError("Invalid broker port: \(port)")
+// MARK: - File spool transport (port-free)
+//
+// mnote drops NDJSON event files into ~/.pi/agent/managerie/events/ where the
+// Managerie app picks them up. No ports, no server races — events written
+// while the app is closed are delivered on its next launch.
+
+let spoolBaseDir = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent(".pi/agent/managerie", isDirectory: true)
+let spoolEventsDir = spoolBaseDir.appendingPathComponent("events", isDirectory: true)
+let heartbeatFile = spoolBaseDir.appendingPathComponent("app.alive")
+
+/// The app touches its heartbeat file every 10s while running.
+func managerieAppAlive(maxAge: TimeInterval = 30) -> Bool {
+    guard let attrs = try? FileManager.default.attributesOfItem(atPath: heartbeatFile.path),
+          let modified = attrs[.modificationDate] as? Date else {
+        return false
     }
-
-    let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: .tcp)
-
-    return try await withCheckedThrowingContinuation { continuation in
-        let queue = DispatchQueue(label: "mnote.broker")
-        var resumed = false
-        var buffer = Data()
-
-        let timeoutWork = DispatchWorkItem {
-            if resumed { return }
-            resumed = true
-            connection.cancel()
-            continuation.resume(throwing: TTSError.serverError("Managerie broker timeout"))
-        }
-
-        func resolve(_ result: Result<BrokerResponse, Error>) {
-            if resumed { return }
-            resumed = true
-            timeoutWork.cancel()
-            connection.cancel()
-            continuation.resume(with: result)
-        }
-
-        func parseResponse(_ data: Data) {
-            guard !data.isEmpty else {
-                resolve(.failure(TTSError.serverError("Empty broker response")))
-                return
-            }
-
-            do {
-                let response = try JSONDecoder().decode(BrokerResponse.self, from: data)
-                resolve(.success(response))
-            } catch {
-                resolve(.failure(TTSError.serverError("Invalid broker response")))
-            }
-        }
-
-        func receiveResponse() {
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
-                if let error {
-                    resolve(.failure(error))
-                    return
-                }
-
-                if let data, !data.isEmpty {
-                    buffer.append(data)
-                    if let newlineIndex = buffer.firstIndex(of: 0x0A) {
-                        let line = buffer.prefix(upTo: newlineIndex)
-                        parseResponse(Data(line))
-                        return
-                    }
-                }
-
-                if isComplete {
-                    parseResponse(buffer)
-                } else {
-                    receiveResponse()
-                }
-            }
-        }
-
-        connection.stateUpdateHandler = { state in
-            switch state {
-            case .ready:
-                do {
-                    var payload = try JSONEncoder().encode(request)
-                    payload.append(0x0A)
-                    connection.send(content: payload, completion: .contentProcessed { error in
-                        if let error {
-                            resolve(.failure(error))
-                            return
-                        }
-                        receiveResponse()
-                    })
-                } catch {
-                    resolve(.failure(error))
-                }
-
-            case .failed(let error):
-                resolve(.failure(error))
-
-            case .cancelled:
-                break
-
-            default:
-                break
-            }
-        }
-
-        queue.asyncAfter(deadline: .now() + timeout, execute: timeoutWork)
-        connection.start(queue: queue)
-    }
+    return Date().timeIntervalSince(modified) < maxAge
 }
 
-func checkBrokerHealth(host: String, brokerPort: Int) async throws {
-    let response = try await sendBrokerCommand(
-        host: host,
-        port: brokerPort,
-        request: BrokerRequest(type: "health", text: nil, voice: nil, sourceApp: nil, sessionId: nil, pid: nil)
-    )
+/// Atomic spool write: tmp file + rename so the app never reads partial JSON.
+func sendViaSpool(request: BrokerRequest) throws {
+    let fm = FileManager.default
+    try fm.createDirectory(at: spoolEventsDir, withIntermediateDirectories: true)
 
-    if response.ok != true {
-        throw TTSError.serverError(response.error ?? "Managerie broker not healthy")
-    }
+    var payload = try JSONEncoder().encode(request)
+    payload.append(0x0A)
+
+    let timestampMs = Int64(Date().timeIntervalSince1970 * 1000)
+    let entropy = String(UUID().uuidString.prefix(6)).lowercased()
+    // %lld, not %d — millisecond timestamps overflow 32-bit format args.
+    let name = String(format: "%013lld-%d-%@.json", timestampMs, getpid(), entropy)
+
+    let tmpURL = spoolEventsDir.appendingPathComponent(".\(name).tmp")
+    try payload.write(to: tmpURL)
+    _ = try fm.replaceItemAt(spoolEventsDir.appendingPathComponent(name), withItemAt: tmpURL)
 }
 
-func stopViaBroker(host: String, brokerPort: Int) async throws {
-    let response = try await sendBrokerCommand(
-        host: host,
-        port: brokerPort,
-        request: BrokerRequest(type: "stop", text: nil, voice: nil, sourceApp: "mnote", sessionId: nil, pid: getpid())
-    )
-
-    if response.ok != true {
-        throw TTSError.serverError(response.error ?? "Broker stop failed")
-    }
+func stopViaSpool() throws {
+    try sendViaSpool(request: BrokerRequest(type: "stop", text: nil, voice: nil, sourceApp: "mnote", sessionId: nil, pid: getpid()))
 }
 
-func enqueueViaBroker(host: String, brokerPort: Int, text: String, voice: String?, sessionId: String?) async throws -> BrokerResponse {
-    let response = try await sendBrokerCommand(
-        host: host,
-        port: brokerPort,
-        request: BrokerRequest(type: "speak", text: text, voice: voice, sourceApp: "mnote", sessionId: sessionId, pid: getpid())
-    )
-
-    if response.ok != true {
-        throw TTSError.serverError(response.error ?? "Broker enqueue failed")
-    }
-
-    return response
+func enqueueViaSpool(text: String, voice: String?, sessionId: String?) throws {
+    try sendViaSpool(request: BrokerRequest(type: "speak", text: text, voice: voice, sourceApp: "mnote", sessionId: sessionId, pid: getpid()))
 }
 
 func main() async {
@@ -296,13 +205,11 @@ func main() async {
         exit(0)
     }
 
-    let client = TTSClient(host: cli.host, port: cli.port)
-
     if cli.stopSpeech {
         do {
-            try await stopViaBroker(host: cli.host, brokerPort: cli.brokerPort)
+            try stopViaSpool()
             if !cli.quiet {
-                FileHandle.standardError.write("Speech stopped.\n".data(using: .utf8)!)
+                FileHandle.standardError.write("Stop request sent.\n".data(using: .utf8)!)
             }
             exit(0)
         } catch {
@@ -334,26 +241,15 @@ func main() async {
         FileHandle.standardError.write("Warning: Unknown voice '\(voice)'\n".data(using: .utf8)!)
     }
 
-    // Check server health
+    // Send via spool. Works even when the app is closed — warn in that case
+    // so the user knows delivery happens on next launch.
     do {
-        let healthy = try await client.healthCheck()
-        if !healthy {
-            throw TTSError.serverNotRunning
-        }
-    } catch {
-        FileHandle.standardError.write("Error: \(TTSError.serverNotRunning.localizedDescription)\n".data(using: .utf8)!)
-        exit(1)
-    }
-
-    // Speak
-    do {
-        try await checkBrokerHealth(host: cli.host, brokerPort: cli.brokerPort)
-        let response = try await enqueueViaBroker(host: cli.host, brokerPort: cli.brokerPort, text: text, voice: cli.voice, sessionId: cli.sessionId)
+        try enqueueViaSpool(text: text, voice: cli.voice, sessionId: cli.sessionId)
         if !cli.quiet {
-            if let queued = response.queued {
-                FileHandle.standardError.write("Enqueued speech job (queue size: \(queued)).\n".data(using: .utf8)!)
+            if managerieAppAlive() {
+                FileHandle.standardError.write("Sent to Managerie.\n".data(using: .utf8)!)
             } else {
-                FileHandle.standardError.write("Enqueued speech job.\n".data(using: .utf8)!)
+                FileHandle.standardError.write("Queued — Managerie isn't running; delivered on next launch.\n".data(using: .utf8)!)
             }
         }
     } catch {

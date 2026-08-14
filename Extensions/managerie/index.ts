@@ -1,11 +1,10 @@
 /**
- * managerie - Text-to-speech extension for Pi
+ * managerie - Managerie connector extension for Pi
  *
- * Adds text-to-speech capabilities to Pi using <voice> tags.
- * Speaks only <voice> tagged content from assistant responses.
- *
- * Requires Loqui.app (TTS server at localhost:18090).
- * Install with: brew install swairshah/tap/loqui
+ * Forwards agent messages and live status to the Managerie menubar app via
+ * its file event spool (~/.pi/agent/managerie/events/) — no ports, no
+ * sockets. Also watches the Managerie inbox so the app can inject replies
+ * into this session. Optional TTS via <voice> tags (off by default).
  *
  * Commands:
  *   /tts        - Toggle TTS on/off
@@ -16,11 +15,10 @@
  *   /tts-stop   - Stop current speech
  *   /tts-status - Show status
  *
- * Global shortcut (via Loqui.app): Cmd+. to stop speech
+ * Global shortcut (via Managerie.app): Cmd+. to stop speech
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import net from "node:net";
 import process from "node:process";
 import fs from "node:fs";
 import path from "node:path";
@@ -29,10 +27,11 @@ import os from "node:os";
 // Inbox configuration for receiving messages from external apps
 const INBOX_BASE_DIR = path.join(os.homedir(), ".pi", "agent", "managerie-inbox");
 
-// Configuration - matches Loqui defaults
-const TTS_PORT = 18090;
-const TTS_HOST = "127.0.0.1";
-const BROKER_PORT = 18091;
+// Port-free transport: events are dropped as files into Managerie's spool
+// directory; the app watches it and ingests. The heartbeat file (touched by
+// the app every 10s) is how we know Managerie is running.
+const SPOOL_DIR = path.join(os.homedir(), ".pi", "agent", "managerie", "events");
+const HEARTBEAT_FILE = path.join(os.homedir(), ".pi", "agent", "managerie", "app.alive");
 const AVAILABLE_VOICES = ["auto", "alba", "vera", "paul", "charles", "michael", "anna", "fantine", "eponine", "cosette", "eve", "george", "mary", "marius", "javert", "azelma", "caro_davy", "peter_yearsley", "stuart_bell"];
 
 // System prompt injection for voice tags - succinct style
@@ -262,102 +261,38 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  function sendBrokerCommand(command: BrokerRequest, timeoutMs = 2500): Promise<BrokerResponse> {
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      let buffer = "";
-      let timeout: ReturnType<typeof setTimeout>;
-
-      const finish = (fn: () => void) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
-        try {
-          fn();
-        } catch {
-          // Ignore finish callback errors
-        }
-      };
-
-      // Attach error handler immediately after creating socket to avoid unhandled connection errors.
-      const socket = net.createConnection({ host: TTS_HOST, port: BROKER_PORT });
-      socket.on("error", () => {
-        finish(() => reject(new Error("Connection failed")));
-      });
-      socket.setEncoding("utf8");
-
-      timeout = setTimeout(() => {
-        finish(() => {
-          socket.destroy();
-          reject(new Error("Broker timeout"));
-        });
-      }, timeoutMs);
-
-      socket.on("connect", () => {
-        socket.write(`${JSON.stringify(command)}\n`);
-        socket.end();
-      });
-
-      socket.on("data", (chunk) => {
-        buffer += chunk;
-        const idx = buffer.indexOf("\n");
-        if (idx === -1) return;
-
-        const line = buffer.slice(0, idx).trim();
-        finish(() => {
-          socket.destroy();
-          if (!line) {
-            reject(new Error("Empty broker response"));
-            return;
-          }
-          try {
-            resolve(JSON.parse(line) as BrokerResponse);
-          } catch {
-            reject(new Error("Invalid broker response"));
-          }
-        });
-      });
-
-      socket.on("end", () => {
-        if (settled) return;
-        const line = buffer.trim();
-        finish(() => {
-          if (!line) {
-            reject(new Error("No broker response"));
-            return;
-          }
-          try {
-            resolve(JSON.parse(line) as BrokerResponse);
-          } catch {
-            reject(new Error("Invalid broker response"));
-          }
-        });
-      });
-    });
-  }
-
-  // Check if Loqui server + broker are running
-  async function checkServer(): Promise<boolean> {
+  // Is the Managerie app alive? It touches the heartbeat file every 10s.
+  function appAlive(maxAgeMs = 30_000): boolean {
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 1500);
-
-      const res = await fetch(`http://${TTS_HOST}:${TTS_PORT}/health`, {
-        signal: controller.signal,
-      }).finally(() => clearTimeout(timeoutId));
-
-      if (!res.ok) {
-        serverReady = false;
-        return false;
-      }
-
-      const broker = await sendBrokerCommand({ type: "health" }, 1500);
-      serverReady = broker.ok === true;
-      return serverReady;
+      const stat = fs.statSync(HEARTBEAT_FILE);
+      return Date.now() - stat.mtimeMs < maxAgeMs;
     } catch {
-      serverReady = false;
       return false;
     }
+  }
+
+  // Drop an event file into the spool — atomic tmp-write + rename so the app
+  // never reads a half-written file. Fire-and-forget: no ports, no responses.
+  let spoolSeq = 0;
+  async function sendBrokerCommand(command: BrokerRequest, _timeoutMs = 2500): Promise<BrokerResponse> {
+    if (command.type === "health") {
+      return { ok: appAlive() };
+    }
+    fs.mkdirSync(SPOOL_DIR, { recursive: true });
+    // Zero-padded ms timestamp keeps lexicographic order == arrival order.
+    const name = `${String(Date.now()).padStart(13, "0")}-${process.pid}-${(spoolSeq++).toString(36)}${Math.random()
+      .toString(36)
+      .slice(2, 6)}.json`;
+    const tmpPath = path.join(SPOOL_DIR, `.${name}.tmp`);
+    fs.writeFileSync(tmpPath, `${JSON.stringify(command)}\n`);
+    fs.renameSync(tmpPath, path.join(SPOOL_DIR, name));
+    return { ok: true };
+  }
+
+  // Check if the Managerie app is running (heartbeat freshness — no network).
+  async function checkServer(): Promise<boolean> {
+    serverReady = appAlive();
+    return serverReady;
   }
 
   // Strip any accidental nested markup from voice content (e.g. <emphasis>)

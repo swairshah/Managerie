@@ -178,6 +178,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         remoteRuntime?.stop()
         micMonitor?.stop()
+        eventSpool?.stop()
         localBroker?.stop()
         LocalTTSRuntime.shared.stopServer()
         speechCoordinator?.stopAll()
@@ -217,12 +218,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     var healthServer: HealthHTTPServer?
     var remoteRuntime: ManagerieRemoteRuntime?
+    var eventSpool: EventSpoolWatcher?
 
     func startLocalBroker() {
         debugLog("Managerie: startLocalBroker called, coordinator=\(speechCoordinator != nil), localBroker=\(localBroker != nil)")
         guard let coordinator = speechCoordinator else {
             debugLog("Managerie: No coordinator, cannot start broker")
             return
+        }
+
+        // Primary transport: the file event spool. No ports involved — this
+        // works even if every TCP port below is taken by another process.
+        if eventSpool == nil {
+            let processor = BrokerRequestProcessor(coordinator: coordinator)
+            let spool = EventSpoolWatcher { line in
+                _ = processor.process(line)
+            }
+            spool.start()
+            eventSpool = spool
+            debugLog("Managerie: Event spool watching \(EventSpool.eventsDir.path)")
         }
 
         // Don't start if already running
@@ -280,6 +294,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func stopLocalBroker() {
         debugLog("Managerie: stopLocalBroker called, localBroker=\(localBroker != nil)")
+        eventSpool?.stop()
+        eventSpool = nil
         localBroker?.stop()
         localBroker = nil
         legacyBroker?.stop()
@@ -347,7 +363,7 @@ private struct SpeechJob {
     let pid: Int?
 }
 
-private struct BrokerRequest: Decodable {
+struct BrokerRequest: Decodable {
     let type: String
     let text: String?
     let voice: String?
@@ -362,7 +378,7 @@ private struct BrokerRequest: Decodable {
     let contextPercent: Int?
 }
 
-private struct BrokerResponse: Encodable {
+struct BrokerResponse: Encodable {
     let ok: Bool
     let error: String?
     let queued: Int?
@@ -2423,12 +2439,88 @@ final class SpeechPlaybackCoordinator {
 }
 
 
+/// Shared request pipeline for both transports: the file event spool (primary)
+/// and the TCP broker (legacy compat for old pi-talk sessions).
+final class BrokerRequestProcessor {
+    private let decoder = JSONDecoder()
+    private let coordinator: SpeechPlaybackCoordinator
+
+    init(coordinator: SpeechPlaybackCoordinator) {
+        self.coordinator = coordinator
+    }
+
+    func process(_ line: Data) -> BrokerResponse {
+        guard !line.isEmpty else {
+            debugLog("Managerie Broker: received empty request")
+            return .failure("Empty request")
+        }
+
+        let request: BrokerRequest
+        do {
+            request = try decoder.decode(BrokerRequest.self, from: line)
+            debugLog("Managerie Broker: received request type=\(request.type), text=\(request.text?.prefix(50) ?? "nil")")
+        } catch {
+            debugLog("Managerie Broker: invalid JSON: \(String(data: line, encoding: .utf8) ?? "?")")
+            return .failure("Invalid JSON request")
+        }
+
+        switch request.type {
+        case "health":
+            let state = coordinator.state()
+            debugLog("Managerie Broker: health check - pending=\(state.pending), playing=\(state.playing)")
+            return .success(pending: state.pending, playing: state.playing, currentQueue: state.currentQueue)
+
+        case "speak":
+            guard let text = request.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                debugLog("Managerie Broker: speak request missing text")
+                return .failure("Missing text")
+            }
+
+            let queued = coordinator.enqueue(
+                text: text,
+                voice: request.voice,
+                sourceApp: request.sourceApp,
+                sessionId: request.sessionId,
+                pid: AgentProcessResolver.canonicalPid(for: request.pid, sourceApp: request.sourceApp)
+            )
+            return .success(queued: queued)
+
+        case "stop":
+            coordinator.stopForSource(sourceApp: request.sourceApp, sessionId: request.sessionId)
+            let state = coordinator.state()
+            return .success(pending: state.pending, playing: state.playing, currentQueue: state.currentQueue)
+
+        case "status":
+            guard let pid = AgentProcessResolver.canonicalPid(for: request.pid, sourceApp: request.sourceApp) else {
+                return .failure("Missing pid for status")
+            }
+            if request.status == "remove" {
+                AgentStatusStore.shared.remove(pid: pid)
+            } else {
+                AgentStatusStore.shared.update(
+                    pid: pid,
+                    sourceApp: request.sourceApp,
+                    sessionId: request.sessionId,
+                    project: request.project,
+                    cwd: request.cwd,
+                    status: request.status ?? "unknown",
+                    detail: request.detail,
+                    contextPercent: request.contextPercent
+                )
+            }
+            return .success()
+
+        default:
+            return .failure("Unknown command: \(request.type)")
+        }
+    }
+}
+
 final class LocalSpeechBroker {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "loqui.local.broker")
     private let encoder = JSONEncoder()
-    private let decoder = JSONDecoder()
-    private let coordinator: SpeechPlaybackCoordinator
+    private let processor: BrokerRequestProcessor
 
     init(port: Int, coordinator: SpeechPlaybackCoordinator) throws {
         guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
@@ -2438,7 +2530,7 @@ final class LocalSpeechBroker {
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
         self.listener = try NWListener(using: params, on: nwPort)
-        self.coordinator = coordinator
+        self.processor = BrokerRequestProcessor(coordinator: coordinator)
     }
 
     func start() {
@@ -2504,73 +2596,7 @@ final class LocalSpeechBroker {
     }
 
     private func handleLine(_ line: Data, on connection: NWConnection) {
-        guard !line.isEmpty else {
-            debugLog("Managerie Broker: received empty request")
-            send(response: .failure("Empty request"), on: connection)
-            return
-        }
-
-        let request: BrokerRequest
-        do {
-            request = try decoder.decode(BrokerRequest.self, from: line)
-            debugLog("Managerie Broker: received request type=\(request.type), text=\(request.text?.prefix(50) ?? "nil")")
-        } catch {
-            debugLog("Managerie Broker: invalid JSON: \(String(data: line, encoding: .utf8) ?? "?")")
-            send(response: .failure("Invalid JSON request"), on: connection)
-            return
-        }
-
-        switch request.type {
-        case "health":
-            let state = coordinator.state()
-            debugLog("Managerie Broker: health check - pending=\(state.pending), playing=\(state.playing)")
-            send(response: .success(pending: state.pending, playing: state.playing, currentQueue: state.currentQueue), on: connection)
-
-        case "speak":
-            guard let text = request.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                debugLog("Managerie Broker: speak request missing text")
-                send(response: .failure("Missing text"), on: connection)
-                return
-            }
-
-            let queued = coordinator.enqueue(
-                text: text,
-                voice: request.voice,
-                sourceApp: request.sourceApp,
-                sessionId: request.sessionId,
-                pid: AgentProcessResolver.canonicalPid(for: request.pid, sourceApp: request.sourceApp)
-            )
-            send(response: .success(queued: queued), on: connection)
-
-        case "stop":
-            coordinator.stopForSource(sourceApp: request.sourceApp, sessionId: request.sessionId)
-            let state = coordinator.state()
-            send(response: .success(pending: state.pending, playing: state.playing, currentQueue: state.currentQueue), on: connection)
-
-        case "status":
-            guard let pid = AgentProcessResolver.canonicalPid(for: request.pid, sourceApp: request.sourceApp) else {
-                send(response: .failure("Missing pid for status"), on: connection)
-                return
-            }
-            if request.status == "remove" {
-                AgentStatusStore.shared.remove(pid: pid)
-            } else {
-                AgentStatusStore.shared.update(
-                    pid: pid,
-                    sourceApp: request.sourceApp,
-                    sessionId: request.sessionId,
-                    project: request.project,
-                    cwd: request.cwd,
-                    status: request.status ?? "unknown",
-                    detail: request.detail,
-                    contextPercent: request.contextPercent
-                )
-            }
-            send(response: .success(), on: connection)
-
-        default:
-            send(response: .failure("Unknown command: \(request.type)"), on: connection)
-        }
+        send(response: processor.process(line), on: connection)
     }
 
     private func send(response: BrokerResponse, on connection: NWConnection) {
@@ -4223,24 +4249,19 @@ struct HelpView: View {
                     }
                 }
 
-                helpSection(title: "HTTP API", icon: "network") {
+                helpSection(title: "Event Spool (port-free API)", icon: "tray.and.arrow.down") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Health endpoint:")
+                        Text("Agents talk to Managerie by dropping JSON files — no ports or sockets. Write to a .tmp file first, then rename to .json:")
                             .font(.callout)
                             .foregroundColor(.secondary)
-                        CodeRow(code: "GET http://127.0.0.1:18090/health", description: "Check Managerie app health")
-                    }
-                }
-
-                helpSection(title: "Local Broker Queue", icon: "arrow.triangle.branch") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Centralized playback queue endpoint:")
-                            .font(.callout)
+                        CodeRow(code: "~/.pi/agent/managerie/events/", description: "Drop NDJSON event files here")
+                        CodeRow(code: "{\"type\":\"speak\",\"text\":\"Hi\",\"sourceApp\":\"claude-code\",\"pid\":123}", description: "Notify (+ optional TTS)")
+                        CodeRow(code: "{\"type\":\"status\",\"status\":\"working\",\"pid\":123}", description: "Live session status")
+                        CodeRow(code: "{\"type\":\"stop\"}", description: "Stop and clear playback queue")
+                        CodeRow(code: "~/.pi/agent/managerie/app.alive", description: "App heartbeat — mtime < 30s means running")
+                        Text("Events sent while the app is closed are delivered on next launch. Legacy TCP (18091, 18081) stays available for old sessions.")
+                            .font(.caption)
                             .foregroundColor(.secondary)
-                        CodeRow(code: "TCP 127.0.0.1:18091", description: "Connect via NDJSON")
-                        CodeRow(code: "{\"type\":\"speak\",\"text\":\"Hi\"}", description: "Enqueue request")
-                        CodeRow(code: "{\"type\":\"stop\"}", description: "Stop and clear queue")
-                        CodeRow(code: "{\"type\":\"health\"}", description: "Check broker status")
                     }
                 }
 
