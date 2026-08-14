@@ -42,20 +42,11 @@ struct StatusBarContentView: View {
         session.currentText ?? session.lastSpokenText
     }
 
-    private func headerSubtitle() -> String {
-        var parts: [String] = []
-        parts.append("\(monitor.sessions.count) active")
-        if monitor.speakingCount > 0 { parts.append("\(monitor.speakingCount) speaking") }
-        if monitor.totalQueuedItems > 0 { parts.append("\(monitor.totalQueuedItems) queued") }
-        return parts.joined(separator: " · ")
-    }
-
     private struct RecentSessionItem: Identifiable {
         let id: String
         let label: String
         let preview: String
         let timestamp: Date
-        let status: RequestPlaybackStatus
     }
 
     private func sessionKey(pid: Int?, sourceApp: String?, sessionId: String?) -> String {
@@ -100,12 +91,27 @@ struct StatusBarContentView: View {
                 id: key,
                 label: sessionLabel,
                 preview: trimmedText(entry.text, maxLength: 40),
-                timestamp: entry.timestamp,
-                status: entry.status
+                timestamp: entry.timestamp
             ))
         }
 
         return result
+    }
+
+    /// Most recent message text for a session, straight from history (works
+    /// even when live status events aren't flowing yet).
+    private func historyMessage(for session: VoiceSession) -> String? {
+        if let pid = session.pid {
+            if let entry = monitor.recentHistory.first(where: { $0.pid == pid }) {
+                return entry.text
+            }
+        }
+        if let sid = session.sessionId {
+            if let entry = monitor.recentHistory.first(where: { $0.sessionId == sid }) {
+                return entry.text
+            }
+        }
+        return nil
     }
 
     // MARK: - Body
@@ -117,27 +123,24 @@ struct StatusBarContentView: View {
                 .padding(.top, 12)
                 .padding(.bottom, 10)
 
-            Divider()
-                .opacity(0.5)
-
             sessionsList
-                .padding(.horizontal, 8)
-                .padding(.vertical, 8)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 8)
 
             let recentSessions = recentInactiveSessions()
             if !recentSessions.isEmpty {
                 Divider()
-                    .opacity(0.5)
+                    .opacity(0.4)
                 recentsSection(recentSessions)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
             }
 
             Divider()
-                .opacity(0.5)
+                .opacity(0.4)
 
-            footer
-                .padding(.horizontal, 10)
+            footer(recentCount: recentSessions.count)
+                .padding(.horizontal, 12)
                 .padding(.vertical, 8)
 
             if let msg = monitor.lastMessage {
@@ -149,7 +152,7 @@ struct StatusBarContentView: View {
                     .padding(.bottom, 8)
             }
         }
-        .frame(width: 340)
+        .frame(width: 350)
         .background(MenuWindowTopPin())
         .onAppear { monitor.start() }
     }
@@ -157,20 +160,16 @@ struct StatusBarContentView: View {
     // MARK: - Header
 
     private var header: some View {
-        HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Managerie")
-                    .font(.system(size: 13, weight: .semibold))
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(monitor.summary.uiColor)
-                        .frame(width: 6, height: 6)
-                    Text(monitor.sessions.isEmpty ? monitor.summary.label : headerSubtitle())
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
-            }
+        HStack(spacing: 8) {
+            Image("MenuBarIconOff", bundle: .module)
+                .renderingMode(.template)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(height: 13)
+                .foregroundStyle(.primary)
+
+            Text("Managerie")
+                .font(.system(size: 14, weight: .semibold))
 
             Spacer()
 
@@ -211,15 +210,14 @@ struct StatusBarContentView: View {
             let visibleSessions = Array(monitor.sessions.prefix(maxVisible))
             let hiddenCount = monitor.sessions.count - visibleSessions.count
 
-            VStack(spacing: 2) {
+            VStack(spacing: 7) {
                 ForEach(visibleSessions) { session in
-                    MenuSessionRow(
+                    MenuSessionCard(
                         session: session,
                         title: sessionTitle(session),
-                        lastMessage: lastMessage(for: session),
+                        lastMessage: lastMessage(for: session) ?? historyMessage(for: session),
                         isExpanded: expandedSessionId == session.id,
                         relativeFormatter: Self.relativeDateFormatter,
-                        audioRecorder: audioRecorder,
                         isRecordingThis: audioRecorder.isRecording && recordingForSession?.id == session.id,
                         onToggle: {
                             expandedSessionId = (expandedSessionId == session.id) ? nil : session.id
@@ -271,10 +269,6 @@ struct StatusBarContentView: View {
             VStack(spacing: 3) {
                 ForEach(items.prefix(3)) { item in
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Circle()
-                            .fill(item.status.tintColor)
-                            .frame(width: 5, height: 5)
-
                         Text(item.label)
                             .font(.caption.weight(.medium))
                             .foregroundStyle(.secondary)
@@ -305,15 +299,20 @@ struct StatusBarContentView: View {
 
     // MARK: - Footer
 
-    private var footer: some View {
+    private func footer(recentCount: Int) -> some View {
         HStack(spacing: 2) {
+            Text(footerSummary(recentCount: recentCount))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+
+            Spacer()
+
             if monitor.speakingCount > 0 || monitor.totalQueuedItems > 0 {
-                FooterButton(title: "Stop All", systemImage: "stop.fill", role: .destructive) {
+                FooterButton(title: "Stop All", systemImage: "stop.fill") {
                     monitor.stopAll()
                 }
             }
-
-            Spacer()
 
             FooterButton(title: "Window", systemImage: "macwindow") {
                 openSettings()
@@ -324,20 +323,26 @@ struct StatusBarContentView: View {
         }
     }
 
+    private func footerSummary(recentCount: Int) -> String {
+        var parts = ["\(monitor.sessions.count) active"]
+        if recentCount > 0 { parts.append("\(recentCount) recent") }
+        if monitor.totalQueuedItems > 0 { parts.append("\(monitor.totalQueuedItems) queued") }
+        return parts.joined(separator: " · ")
+    }
+
     private func openSettings() {
         AppDelegate.shared?.openSettings()
     }
 }
 
-// MARK: - Session Row
+// MARK: - Session Card (Trackie-style: monochrome, roomy, message-forward)
 
-private struct MenuSessionRow: View {
+private struct MenuSessionCard: View {
     let session: VoiceSession
     let title: String
     let lastMessage: String?
     let isExpanded: Bool
     let relativeFormatter: RelativeDateTimeFormatter
-    let audioRecorder: AudioRecorder
     let isRecordingThis: Bool
     let onToggle: () -> Void
     let onJump: () -> Void
@@ -349,91 +354,63 @@ private struct MenuSessionRow: View {
     @State private var draft: String = ""
     @FocusState private var inputFocused: Bool
 
-    private func collapsedPreview() -> String? {
-        if session.activity.isWorkStatus, let detail = session.statusDetail, !detail.isEmpty {
-            return detail
-        }
-        return lastMessage
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Row header (click to expand)
+            // Card header (click to expand)
             Button(action: onToggle) {
-                HStack(alignment: .center, spacing: 8) {
-                    Circle()
-                        .fill(session.activity.color)
-                        .frame(width: 7, height: 7)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
 
-                    VStack(alignment: .leading, spacing: 1) {
-                        HStack(spacing: 5) {
-                            Text(title)
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(.primary)
-                                .lineLimit(1)
-                            Text(session.activity.label)
-                                .font(.caption2)
-                                .foregroundStyle(session.activity.color)
-                        }
-
-                        if let preview = collapsedPreview() {
-                            Text(preview.replacingOccurrences(of: "\n", with: " "))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
+                    if let message = lastMessage?.trimmingCharacters(in: .whitespacesAndNewlines), !message.isEmpty {
+                        Text(message.replacingOccurrences(of: "\n", with: " "))
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(isExpanded ? 6 : 2)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .multilineTextAlignment(.leading)
+                    } else if let detail = session.statusDetail, !detail.isEmpty {
+                        Text(detail)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
 
-                    Spacer(minLength: 4)
+                    HStack(spacing: 5) {
+                        TagPill(text: session.sourceApp)
+                        TagPill(text: session.activity.label.lowercased())
+                        if session.queuedCount > 0 {
+                            TagPill(text: "\(session.queuedCount) queued")
+                        }
 
-                    if session.queuedCount > 0 {
-                        Text("\(session.queuedCount)")
-                            .font(.caption2.weight(.medium))
-                            .monospacedDigit()
-                            .foregroundStyle(.orange)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(Capsule().fill(Color.orange.opacity(0.14)))
+                        Spacer()
+
+                        if let lastAt = session.lastSpokenAt {
+                            Text(relativeFormatter.localizedString(for: lastAt, relativeTo: Date()))
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(.tertiary)
+                        }
                     }
-
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
+                .padding(.horizontal, 11)
+                .padding(.vertical, 9)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
-            // Expanded detail
+            // Expanded: reply bar + jump
             if isExpanded {
                 VStack(alignment: .leading, spacing: 8) {
-                    if let message = lastMessage, !message.isEmpty {
-                        HStack(alignment: .top, spacing: 7) {
-                            RoundedRectangle(cornerRadius: 1.5)
-                                .fill(session.activity.color.opacity(0.5))
-                                .frame(width: 3)
-                            Text(message.trimmingCharacters(in: .whitespacesAndNewlines))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(4)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .textSelection(.enabled)
-                        }
-                    }
-
-                    // Metadata
                     HStack(spacing: 8) {
-                        Label(session.sourceApp, systemImage: "app.badge")
-                            .labelStyle(.titleOnly)
                         if let pid = session.pid {
                             Text("PID \(pid)")
                                 .monospacedDigit()
                         }
-                        if let lastAt = session.lastSpokenAt {
-                            Text(relativeFormatter.localizedString(for: lastAt, relativeTo: Date()))
+                        if let cwd = session.cwd {
+                            Text(URL(fileURLWithPath: cwd).lastPathComponent)
+                                .lineLimit(1)
                         }
                         Spacer()
                         if session.pid != nil {
@@ -441,19 +418,18 @@ private struct MenuSessionRow: View {
                                 Label("Jump", systemImage: "arrow.up.forward.square")
                                     .font(.caption2.weight(.medium))
                             }
-                            .buttonStyle(PressableCapsuleStyle(tint: .blue))
+                            .buttonStyle(QuietPillStyle())
                             .help("Focus this agent's terminal session")
                         }
                     }
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
 
-                    // Input bar: text + mic
                     if session.pid != nil {
                         HStack(spacing: 6) {
                             TextField("Message \(session.sourceApp)…", text: $draft)
                                 .textFieldStyle(.plain)
-                                .font(.caption)
+                                .font(.system(size: 12))
                                 .focused($inputFocused)
                                 .onSubmit(sendDraft)
                                 .padding(.horizontal, 8)
@@ -464,13 +440,15 @@ private struct MenuSessionRow: View {
                                 )
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 6)
-                                        .strokeBorder(Color.primary.opacity(inputFocused ? 0.16 : 0.08), lineWidth: 1)
+                                        .strokeBorder(Color.primary.opacity(inputFocused ? 0.18 : 0.08), lineWidth: 1)
                                 )
 
                             Button(action: sendDraft) {
                                 Image(systemName: "arrow.up.circle.fill")
                                     .font(.system(size: 17))
-                                    .foregroundStyle(draft.trimmingCharacters(in: .whitespaces).isEmpty ? Color.secondary.opacity(0.4) : Color.accentColor)
+                                    .foregroundStyle(draft.trimmingCharacters(in: .whitespaces).isEmpty
+                                        ? Color.secondary.opacity(0.4)
+                                        : Color.accentColor)
                             }
                             .buttonStyle(PressableIconStyle())
                             .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -485,25 +463,16 @@ private struct MenuSessionRow: View {
                         }
                     }
                 }
-                .padding(.horizontal, 10)
-                .padding(.top, 2)
-                .padding(.bottom, 9)
+                .padding(.horizontal, 11)
+                .padding(.bottom, 10)
                 .onAppear { inputFocused = true }
             }
         }
         .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(backgroundFill)
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.primary.opacity(isExpanded ? 0.075 : (isHovering ? 0.075 : 0.05)))
         )
-        .onHover { hovering in
-            isHovering = hovering
-        }
-    }
-
-    private var backgroundFill: Color {
-        if isExpanded { return Color.primary.opacity(0.055) }
-        if isHovering { return Color.primary.opacity(0.045) }
-        return .clear
+        .onHover { isHovering = $0 }
     }
 
     private func sendDraft() {
@@ -511,6 +480,22 @@ private struct MenuSessionRow: View {
         guard !text.isEmpty else { return }
         onSend(text)
         draft = ""
+    }
+}
+
+// MARK: - Tag Pill (monochrome, Trackie-style)
+
+private struct TagPill: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 10.5, weight: .medium))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2.5)
+            .background(Capsule().fill(Color.primary.opacity(0.08)))
     }
 }
 
@@ -574,7 +559,7 @@ private struct MenuWindowTopPin: NSViewRepresentable {
     }
 }
 
-// MARK: - Status Bar Icon
+// MARK: - Status Bar Icon (template — adapts to menubar, no status tinting)
 
 struct StatusBarIcon: View {
     let summary: VoiceSummary
@@ -586,69 +571,33 @@ struct StatusBarIcon: View {
             .help(!serverEnabled ? "Broker is stopped" : (serverOnline ? summary.label : "Broker offline"))
     }
 
-    private var statusColor: NSColor {
-        guard serverEnabled else { return .white }
-        guard serverOnline else { return .white }
-
-        switch summary.color {
-        case "green": return .systemGreen
-        case "orange": return .systemOrange
-        case "red": return .systemRed
-        case "blue": return .systemBlue
-        case "purple": return .systemPurple
-        case "yellow": return .systemYellow
-        default: return .white
-        }
-    }
-
     private var menuBarImage: NSImage {
         let imageName = (serverOnline && serverEnabled) ? "menubar_on" : "menubar_off"
 
         guard let url = Bundle.module.url(forResource: imageName, withExtension: "png", subdirectory: "Resources"),
-              let originalImage = NSImage(contentsOf: url) else {
+              let image = NSImage(contentsOf: url) else {
             return NSImage(systemSymbolName: "bell", accessibilityDescription: nil) ?? NSImage()
         }
 
-        let tintedImage = tintImage(originalImage, with: statusColor)
-        // Fill the menubar height; keep the glyph's natural aspect ratio.
+        // Template rendering: macOS adapts the glyph to menubar appearance.
+        image.isTemplate = true
         let pointHeight: CGFloat = 18
-        let aspect = originalImage.size.height > 0
-            ? originalImage.size.width / originalImage.size.height
-            : 1
-        tintedImage.size = NSSize(width: (pointHeight * aspect).rounded(), height: pointHeight)
-        return tintedImage
-    }
-
-    private func tintImage(_ image: NSImage, with color: NSColor) -> NSImage {
-        let size = image.size
-        let tinted = NSImage(size: size)
-
-        tinted.lockFocus()
-        image.draw(in: NSRect(origin: .zero, size: size),
-                   from: NSRect(origin: .zero, size: size),
-                   operation: .sourceOver,
-                   fraction: 1.0)
-        color.set()
-        NSRect(origin: .zero, size: size).fill(using: .sourceAtop)
-        tinted.unlockFocus()
-        tinted.isTemplate = false
-
-        return tinted
+        let aspect = image.size.height > 0 ? image.size.width / image.size.height : 1
+        image.size = NSSize(width: (pointHeight * aspect).rounded(), height: pointHeight)
+        return image
     }
 }
 
 // MARK: - Button Styles
 
-/// Small capsule button with press feedback (scale 0.96).
-struct PressableCapsuleStyle: ButtonStyle {
-    var tint: Color = .accentColor
-
+/// Small monochrome pill button with press feedback.
+struct QuietPillStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
-            .background(Capsule().fill(tint.opacity(configuration.isPressed ? 0.25 : 0.14)))
-            .foregroundStyle(tint)
+            .background(Capsule().fill(Color.primary.opacity(configuration.isPressed ? 0.14 : 0.08)))
+            .foregroundStyle(.primary)
             .scaleEffect(configuration.isPressed ? 0.96 : 1.0)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
@@ -667,7 +616,6 @@ struct PressableIconStyle: ButtonStyle {
 struct FooterButton: View {
     let title: String
     let systemImage: String
-    var role: ButtonRole? = nil
     let action: () -> Void
 
     @State private var isHovering = false
@@ -680,7 +628,7 @@ struct FooterButton: View {
                 Text(title)
                     .font(.caption)
             }
-            .foregroundStyle(role == .destructive ? Color.red : (isHovering ? Color.primary : Color.secondary))
+            .foregroundStyle(isHovering ? Color.primary : Color.secondary)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .background(
@@ -694,7 +642,7 @@ struct FooterButton: View {
     }
 }
 
-// MARK: - Push-to-Talk Mic Button
+// MARK: - Push-to-Talk Mic Button (monochrome)
 
 struct MicButton: View {
     let isRecording: Bool
@@ -706,11 +654,11 @@ struct MicButton: View {
     var body: some View {
         Image(systemName: isRecording ? "mic.fill" : "mic")
             .font(.system(size: 12, weight: .medium))
-            .foregroundStyle(isRecording ? .red : .orange)
+            .foregroundStyle(isRecording ? Color.primary : Color.secondary)
             .frame(width: 26, height: 24)
             .background(
                 RoundedRectangle(cornerRadius: 6)
-                    .fill(isRecording ? Color.red.opacity(0.18) : Color.orange.opacity(0.13))
+                    .fill(Color.primary.opacity(isRecording ? 0.18 : 0.07))
             )
             .scaleEffect(isPressed ? 0.96 : 1.0)
             .animation(.easeOut(duration: 0.12), value: isPressed)

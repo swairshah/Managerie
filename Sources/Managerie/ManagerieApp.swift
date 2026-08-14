@@ -494,9 +494,28 @@ final class RequestHistoryStore: ObservableObject {
         let loquiDir = appSupport.appendingPathComponent("Managerie", isDirectory: true)
         historyFileURL = loquiDir.appendingPathComponent("request-history.json")
 
-        let initial = loadFromDisk()
+        var initial = loadFromDisk()
+
+        // One-time migration: absorb the old PiTalk app's history so sessions
+        // still running the legacy extension show their last messages.
+        if !UserDefaults.standard.bool(forKey: "legacyHistoryImported") {
+            let legacyURL = appSupport
+                .appendingPathComponent("PiTalk", isDirectory: true)
+                .appendingPathComponent("request-history.json")
+            if let data = try? Data(contentsOf: legacyURL),
+               let legacy = try? JSONDecoder().decode([RequestHistoryEntry].self, from: data) {
+                let known = Set(initial.map(\.id))
+                let merged = (initial + legacy.filter { !known.contains($0.id) })
+                    .sorted { $0.timestamp > $1.timestamp }
+                initial = Array(merged.prefix(maxEntries))
+                debugLog("Managerie: imported \(legacy.count) legacy PiTalk history entries")
+            }
+            UserDefaults.standard.set(true, forKey: "legacyHistoryImported")
+        }
+
         storageEntries = initial
         publishSnapshot(initial)
+        storageQueue.sync { schedulePersistLocked() }
     }
 
     @discardableResult
