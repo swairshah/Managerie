@@ -4,6 +4,18 @@
 <dict>
     <key>com.apple.security.app-sandbox</key>
     <false/>
+
+    <!-- Hardened runtime blocks the microphone unless this is present. Without
+         it the app can't even reach the permission prompt, so it never shows
+         up in System Settings > Privacy > Microphone. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+
+    <!-- JumpHandler drives Terminal/iTerm2/Ghostty via AppleScript to focus a
+         session. Hardened runtime requires this to send Apple events. -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+
     <key>com.apple.security.network.client</key>
     <true/>
     <key>com.apple.security.network.server</key>

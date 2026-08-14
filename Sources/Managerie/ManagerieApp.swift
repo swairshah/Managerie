@@ -156,6 +156,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Start remote runtime (WebSocket control API for companion iOS app).
         remoteRuntime = ManagerieRemoteRuntime(appDelegate: self)
         remoteRuntime?.startIfEnabled()
+
+        runFirstLaunchSetupIfNeeded()
+    }
+
+    /// On a fresh install, ask for the permissions Managerie actually needs.
+    ///
+    /// macOS only lists an app under System Settings > Privacy & Security once
+    /// it has *requested* the permission, so an app that never asks is invisible
+    /// there and looks broken. We request the microphone (voice replies) and
+    /// then show the Permissions pane, where Accessibility can be granted too.
+    private func runFirstLaunchSetupIfNeeded() {
+        let key = "didRunFirstLaunchSetup"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        UserDefaults.standard.set(true, forKey: key)
+
+        Task { @MainActor in
+            // Let the menu bar item settle before stacking a system dialog.
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            _ = await PermissionsManager.requestMicrophone()
+            openSettings(pane: .permissions)
+        }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -317,6 +338,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Actions
 
     @objc func openSettings() {
+        openSettings(pane: nil)
+    }
+
+    func openSettings(pane: MainPane?) {
+        if let pane {
+            UserDefaults.standard.set(pane.rawValue, forKey: "mainWindowPane")
+        }
         if settingsWindow == nil {
             let settingsView = SettingsView()
             let hostingController = NSHostingController(rootView: settingsView)

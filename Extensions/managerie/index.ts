@@ -122,7 +122,7 @@ export default function (pi: ExtensionAPI) {
   let serverReady = false;
   let serverWarningShown = false;  // Only show server warning once per session
   let voiceStyle: "succinct" | "verbose" = "verbose";  // Voice prompt style
-  let currentVoice = "auto";  // Current TTS voice ("auto" = let Loqui assign per-session)
+  let currentVoice = "auto";  // Current TTS voice ("auto" = let Managerie assign per-session)
   let currentSessionId: string | undefined;
 
   // Notification-first: track the turn's final assistant text so it can be
@@ -693,7 +693,7 @@ export default function (pi: ExtensionAPI) {
     description: `Change TTS voice (${AVAILABLE_VOICES.join(", ")})`,
     handler: async (args, ctx) => {
       if (!args) {
-        const voiceDisplay = currentVoice === "auto" ? "auto (Loqui assigns per-session)" : currentVoice;
+        const voiceDisplay = currentVoice === "auto" ? "auto (Managerie assigns per-session)" : currentVoice;
         ctx.ui.notify(`Current voice: ${voiceDisplay}\nAvailable: ${AVAILABLE_VOICES.join(", ")}`, "info");
         return;
       }
@@ -704,7 +704,7 @@ export default function (pi: ExtensionAPI) {
       }
       currentVoice = voice;
       const msg = voice === "auto" 
-        ? "🎤 Voice: auto (Loqui will assign different voices per session)"
+        ? "🎤 Voice: auto (Managerie will assign different voices per session)"
         : `🎤 Voice changed to: ${voice}`;
       ctx.ui.notify(msg, "info");
     },
@@ -720,7 +720,7 @@ export default function (pi: ExtensionAPI) {
       if (!serverReady) {
         const ready = await checkServer();
         if (!ready) {
-          ctx.ui.notify("Loqui broker not running", "error");
+          ctx.ui.notify("Managerie broker not running", "error");
           return;
         }
       }
@@ -735,7 +735,7 @@ export default function (pi: ExtensionAPI) {
         await sendBrokerCommand({ type: "stop", sourceApp: "pi", sessionId: activeSessionKey() });
         ctx.ui.notify("Speech stopped", "info");
       } catch {
-        ctx.ui.notify("Could not reach Loqui broker", "warning");
+        ctx.ui.notify("Could not reach Managerie broker", "warning");
       }
     },
   });

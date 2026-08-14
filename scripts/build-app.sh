@@ -175,9 +175,11 @@ cat > "$APP_DIR/Contents/Info.plist" << EOF
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Managerie needs microphone access to record voice commands for agent sessions.</string>
+    <string>Managerie needs microphone access so you can talk back to your agent sessions.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
-    <string>Managerie uses on-device speech recognition to turn voice commands into text.</string>
+    <string>Managerie uses on-device speech recognition to turn voice replies into text.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Managerie controls your terminal (Ghostty, iTerm2, Terminal) to jump to the session an agent is waiting in.</string>
 </dict>
 </plist>
 EOF
@@ -186,6 +188,24 @@ EOF
 echo -n "APPL????" > "$APP_DIR/Contents/PkgInfo"
 
 echo ""
+# Ad-hoc sign with the real entitlements + hardened runtime.
+#
+# Dev builds used to ship unsigned, which meant they got microphone access that
+# the notarized release build did not — the entitlement bug was invisible until
+# someone installed from Homebrew. Signing dev builds the same way keeps the two
+# honest. audio-input and apple-events are unrestricted, so ad-hoc works fine.
+ENTITLEMENTS="Sources/Managerie/Managerie.entitlements"
+if [ -f "$ENTITLEMENTS" ]; then
+    codesign --force --deep --options runtime \
+        --entitlements "$ENTITLEMENTS" \
+        --sign - "$APP_DIR" 2>/dev/null
+    if codesign -d --entitlements - "$APP_DIR" 2>/dev/null | grep -q "audio-input"; then
+        echo "🔏 Ad-hoc signed with entitlements (mic + apple events)"
+    else
+        echo "⚠️  Ad-hoc signing did not apply entitlements"
+    fi
+fi
+
 echo "✅ Built: $APP_DIR"
 echo "✅ Built: $BINARY_PATH/mnote (CLI tool)"
 echo ""

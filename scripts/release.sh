@@ -86,6 +86,19 @@ echo -e "${YELLOW}🔨 Building universal binary (arm64 + x86_64)...${NC}"
 APP_DIR=".build/Managerie.app"
 
 # 4. Code sign the app bundle
+#
+# The entitlements are not optional: hardened runtime (--options runtime) blocks
+# microphone access and Apple events unless the app is signed with
+# com.apple.security.device.audio-input and .automation.apple-events. Without
+# them macOS denies the request before any prompt appears, so the app never gets
+# listed in System Settings > Privacy & Security at all.
+ENTITLEMENTS="Sources/Managerie/Managerie.entitlements"
+
+if [ ! -f "$ENTITLEMENTS" ]; then
+    echo -e "${RED}Error: entitlements file missing at $ENTITLEMENTS${NC}"
+    exit 1
+fi
+
 echo -e "${YELLOW}🔏 Signing app bundle...${NC}"
 codesign --force --options runtime \
     --sign "$SIGNING_IDENTITY" \
@@ -98,12 +111,23 @@ if [ -f "$APP_DIR/Contents/Resources/pocket-tts-cli" ]; then
 fi
 
 codesign --force --deep --options runtime \
+    --entitlements "$ENTITLEMENTS" \
     --sign "$SIGNING_IDENTITY" \
     "$APP_DIR"
 
 # Verify signature
 echo -e "${YELLOW}Verifying signature...${NC}"
 codesign --verify --verbose=2 "$APP_DIR"
+
+# Fail loudly if the entitlements didn't make it into the signature — this is
+# the exact regression that shipped a mic-less 1.1.0.
+echo -e "${YELLOW}Verifying entitlements...${NC}"
+if codesign -d --entitlements - "$APP_DIR" 2>/dev/null | grep -q "audio-input"; then
+    echo -e "   ${GREEN}✓ microphone entitlement present${NC}"
+else
+    echo -e "${RED}Error: audio-input entitlement missing from signed app${NC}"
+    exit 1
+fi
 spctl --assess --verbose=2 "$APP_DIR" || true
 
 if [ "$SKIP_NOTARIZE" = false ]; then

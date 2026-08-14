@@ -1,25 +1,25 @@
 # managerie
 
-Text-to-speech extension for [Pi coding agent](https://github.com/mariozechner/pi-coding-agent). Gives Pi a voice using `<voice>` tags.
-
-![managerie demo](https://raw.githubusercontent.com/swairshah/Loqui/main/assets/demo.gif)
+Managerie connector extension for the [Pi coding agent](https://github.com/mariozechner/pi-coding-agent). Connects Pi sessions to the [Managerie](https://github.com/swairshah/Managerie) menu bar app — notifications, live agent status, reply injection, and optional voice output via `<voice>` tags.
 
 ## Features
 
-- **Local TTS** - No cloud APIs, runs entirely on your Mac
-- **Multiple voices** - Multiple local voice options
-- **Central playback** - Pi sends speech jobs to Loqui's local broker queue
-- **Configurable** - Toggle verbosity, mute, change voices
+- **Notification-first** - When a turn finishes, the agent's final message is forwarded to Managerie and surfaced as a macOS notification (click to jump back to the session)
+- **Live status** - Streams agent state (thinking / reading / editing / running / done / error) plus project, cwd, and context usage to the Managerie menu bar
+- **Reply injection** - Watches a per-PID inbox so Managerie (e.g. dictation) can inject messages back into the running Pi session
+- **Port-free transport** - Events are written as files to Managerie's spool directory (`~/.pi/agent/managerie/events/`) — no sockets, no ports
+- **Optional TTS** - Off by default. Enable with `/tts` to have Pi speak `<voice>` tagged summaries
 
 ## Requirements
 
-**Loqui.app** must be installed and running (provides the TTS server + local broker queue).
+**Managerie.app** must be installed and running (menu bar app):
 
 ```bash
-brew install swairshah/tap/loqui
+brew tap swairshah/tap
+brew install --cask swairshah/tap/managerie
 ```
 
-Then launch Loqui from Applications - it runs in the menubar.
+Then launch Managerie from Applications — it runs in the menu bar.
 
 ## Installation
 
@@ -29,15 +29,22 @@ pi install npm:@swairshah/managerie
 
 ## Usage
 
-Once installed, Pi will automatically speak `<voice>` tagged content in its responses.
+Once installed, the extension automatically:
+
+1. Shows the session PID in Pi's status bar (used by Managerie's jump handler to find the right terminal pane)
+2. Sends live status events as the agent works
+3. Forwards the final assistant message of each turn as a notification
+4. Accepts injected replies (dictation) from Managerie
+
+Voice output is opt-in — run `/tts` to enable it.
 
 ### Commands
 
 | Command | Description |
 |---------|-------------|
-| `/tts` | Toggle TTS on/off |
+| `/tts` | Toggle TTS on/off (includes voice prompt injection) |
 | `/tts-mute` | Mute audio (keeps voice tags in responses) |
-| `/tts-voice <name>` | Change voice (alba, vera, paul, charles, michael, anna, fantine, eponine, cosette, eve, george, mary, marius, javert, azelma, caro_davy, peter_yearsley, stuart_bell) |
+| `/tts-voice <name>` | Change voice (`auto` = Managerie assigns per-session) |
 | `/tts-style` | Toggle between succinct and verbose voice prompts |
 | `/tts-say <text>` | Speak arbitrary text |
 | `/tts-stop` | Stop current speech |
@@ -45,14 +52,15 @@ Once installed, Pi will automatically speak `<voice>` tagged content in its resp
 
 ### Global Shortcut
 
-Press **Cmd+.** to stop speech at any time (requires Loqui.app running).
+Press **Cmd+.** to stop speech at any time (requires Managerie.app running).
 
 ## How it works
 
-1. The extension injects a system prompt that teaches Pi to use `<voice>` tags
-2. When Pi responds, the extension extracts `<voice>` content
-3. The extension sends speech jobs to Loqui's local broker (`127.0.0.1:18091`), including `sourceApp`, `sessionId`, and `pid`
-4. Loqui schedules per-session queues and plays audio centrally (no cloud, no API keys)
+1. The extension writes NDJSON event files (atomic tmp-write + rename) into `~/.pi/agent/managerie/events/`; Managerie watches and ingests them
+2. Managerie's liveness is detected via a heartbeat file (`~/.pi/agent/managerie/app.alive`, touched every 10s by the app)
+3. Agent messages become macOS notifications; clicking one jumps to the agent's terminal session
+4. For replies, Managerie drops JSON files into `~/.pi/agent/managerie-inbox/<pid>/`; the extension watches this inbox and injects the text into the session
+5. With `/tts` enabled, a system prompt teaches Pi to use `<voice>` tags; the extension extracts them from the stream and enqueues speech jobs with `sourceApp`, `sessionId`, and `pid` so Managerie can schedule per-session playback
 
 ## Publishing (maintainers)
 
@@ -69,11 +77,6 @@ Or from this directory:
 npm run pack:preview
 npm run publish:npm
 ```
-
-## Credits
-
-- TTS model: [Pocket TTS](https://github.com/kyutai-labs/moshi) by Kyutai Labs
-- Rust implementation: [pocket-tts](https://github.com/babybirdprd/pocket-tts) by babybirdprd
 
 ## License
 
