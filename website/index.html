@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light only">
+<title>Managerie — a menagerie of coding agents in your menubar</title>
+<meta name="description" content="Managerie watches your pi, claude-code, and codex sessions. It chimes when an agent needs you, jumps you to the right terminal, and lets you reply by text or voice.">
+<meta property="og:title" content="Managerie">
+<meta property="og:description" content="A menagerie of coding agents in your menubar — notifications, live status, and replies for pi, claude-code, and codex.">
+<meta property="og:image" content="https://managerie.exe.xyz/assets/icon.png">
+<link rel="icon" type="image/png" href="/assets/icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,400..900,50..100&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    color-scheme: light only;
+    --cream: #F2E8CE;
+    --cream-deep: #EADDBb;
+    --ink: #3D2314;
+    --rust: #C0492F;
+    --amber: #D4A017;
+    --teal: #37655E;
+    --paper-line: rgba(61, 35, 20, 0.16);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--cream);
+    color: var(--ink);
+    font-family: "Fraunces", Georgia, serif;
+    font-optical-sizing: auto;
+    line-height: 1.55;
+    /* subtle halftone paper */
+    background-image: radial-gradient(rgba(61,35,20,0.055) 1px, transparent 1.4px);
+    background-size: 18px 18px;
+  }
+
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 24px; }
+
+  /* ---------- header ---------- */
+  header {
+    padding: 22px 0 18px;
+    border-bottom: 3px solid var(--ink);
+    background: var(--cream);
+  }
+  header .wrap { display: flex; align-items: center; gap: 12px; }
+  header img { height: 30px; width: auto; image-rendering: -webkit-optimize-contrast; }
+  header .word { font-weight: 800; font-size: 22px; letter-spacing: 0.5px; }
+  header nav { margin-left: auto; display: flex; gap: 22px; font-size: 15px; }
+  header a { color: var(--ink); text-decoration: none; border-bottom: 2px solid transparent; padding-bottom: 1px; }
+  header a:hover { border-bottom-color: var(--rust); color: var(--rust); }
+
+  /* ---------- hero ---------- */
+  .hero { padding: 72px 0 56px; text-align: center; }
+  .hero .icon {
+    width: 168px; height: 168px; border-radius: 38px;
+    border: 3px solid var(--ink);
+    box-shadow: 8px 8px 0 var(--ink);
+    margin-bottom: 34px;
+    background: var(--cream);
+  }
+  .hero h1 {
+    font-size: clamp(38px, 6vw, 60px);
+    font-weight: 850;
+    font-variation-settings: "SOFT" 80;
+    line-height: 1.08;
+    letter-spacing: -0.5px;
+    max-width: 780px; margin: 0 auto 20px;
+  }
+  .hero h1 .rust { color: var(--rust); }
+  .hero .sub {
+    font-size: 19px; max-width: 640px; margin: 0 auto 34px; color: #5b4232;
+  }
+  .agents { display: inline-flex; gap: 10px; margin-bottom: 36px; flex-wrap: wrap; justify-content: center; }
+  .agent-chip {
+    font-family: "IBM Plex Mono", monospace; font-size: 14px; font-weight: 600;
+    padding: 6px 14px; border: 2.5px solid var(--ink); border-radius: 999px;
+    background: var(--cream); box-shadow: 3px 3px 0 var(--ink);
+  }
+  .agent-chip.pi { background: var(--amber); }
+  .agent-chip.claude { background: #E8B98F; }
+  .agent-chip.codex { background: #BFD3C1; }
+
+  .install-box {
+    display: inline-flex; align-items: center; gap: 14px;
+    font-family: "IBM Plex Mono", monospace; font-size: 16.5px; font-weight: 500;
+    background: var(--ink); color: var(--cream);
+    padding: 16px 22px; border-radius: 12px;
+    box-shadow: 6px 6px 0 var(--rust);
+    cursor: pointer; border: none;
+  }
+  .install-box .dollar { color: var(--amber); user-select: none; }
+  .install-box:active { transform: translate(2px, 2px); box-shadow: 4px 4px 0 var(--rust); }
+  .copy-hint { display: block; margin-top: 14px; font-size: 13.5px; color: #8a6f56; font-style: italic; }
+
+  /* ---------- screenshot ---------- */
+  .shot-section { padding: 20px 0 70px; text-align: center; }
+  .shot-frame {
+    display: inline-block; border: 3px solid var(--ink); border-radius: 16px;
+    overflow: hidden; box-shadow: 10px 10px 0 var(--amber);
+    max-width: 100%;
+    background: #2a2d33;
+  }
+  .shot-frame img { display: block; max-width: 100%; height: auto; }
+  .shot-caption { margin-top: 20px; font-size: 15px; font-style: italic; color: #7a6046; }
+
+  /* ---------- section headings ---------- */
+  .kicker {
+    font-family: "IBM Plex Mono", monospace; font-size: 13px; font-weight: 600;
+    letter-spacing: 2.5px; text-transform: uppercase; color: var(--rust);
+    margin-bottom: 10px;
+  }
+  h2 { font-size: 34px; font-weight: 800; margin-bottom: 14px; line-height: 1.15; }
+  .section { padding: 60px 0; }
+  .section.alt { background: var(--cream-deep); border-top: 3px solid var(--ink); border-bottom: 3px solid var(--ink); }
+
+  /* ---------- how it works cards ---------- */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 22px; margin-top: 34px; }
+  .card {
+    border: 3px solid var(--ink); border-radius: 14px; background: var(--cream);
+    padding: 24px 22px; box-shadow: 6px 6px 0 var(--ink);
+  }
+  .card .emoji { font-size: 30px; display: block; margin-bottom: 12px; }
+  .card h3 { font-size: 20px; font-weight: 800; margin-bottom: 8px; }
+  .card p { font-size: 15.5px; color: #5b4232; }
+  .card p code { font-family: "IBM Plex Mono", monospace; font-size: 13.5px; background: rgba(61,35,20,0.08); padding: 1px 5px; border-radius: 4px; }
+
+  /* ---------- spool ---------- */
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; align-items: center; margin-top: 30px; }
+  @media (max-width: 760px) { .split { grid-template-columns: 1fr; } }
+  .split p { font-size: 16.5px; color: #5b4232; margin-bottom: 14px; }
+  pre {
+    font-family: "IBM Plex Mono", monospace; font-size: 13px; line-height: 1.6;
+    background: var(--ink); color: var(--cream);
+    padding: 20px 22px; border-radius: 12px; overflow-x: auto;
+    box-shadow: 6px 6px 0 var(--teal);
+  }
+  pre .c { color: #a08a70; }
+  pre .a { color: var(--amber); }
+
+  /* ---------- install steps ---------- */
+  .steps { counter-reset: step; margin-top: 30px; display: grid; gap: 18px; max-width: 720px; }
+  .step {
+    display: flex; gap: 18px; align-items: flex-start;
+    border: 3px solid var(--ink); border-radius: 14px; background: var(--cream);
+    padding: 20px 22px; box-shadow: 5px 5px 0 var(--ink);
+  }
+  .step-num {
+    counter-increment: step; flex-shrink: 0;
+    width: 40px; height: 40px; border-radius: 50%;
+    background: var(--rust); color: var(--cream);
+    border: 2.5px solid var(--ink);
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 800; font-size: 19px;
+  }
+  .step-num::before { content: counter(step); }
+  .step h3 { font-size: 18px; font-weight: 800; margin-bottom: 5px; }
+  .step p { font-size: 15.5px; color: #5b4232; }
+  .step code, .usage code {
+    font-family: "IBM Plex Mono", monospace; font-size: 13.5px;
+    background: rgba(61,35,20,0.09); padding: 2px 7px; border-radius: 5px; white-space: nowrap;
+  }
+
+  /* ---------- usage ---------- */
+  .usage ul { margin: 22px 0 0 2px; list-style: none; display: grid; gap: 13px; max-width: 760px; }
+  .usage li { padding-left: 30px; position: relative; font-size: 16.5px; color: #4a3325; }
+  .usage li::before {
+    content: "✦"; position: absolute; left: 2px; top: 0;
+    color: var(--rust); font-size: 17px;
+  }
+
+  /* ---------- footer ---------- */
+  footer {
+    border-top: 3px solid var(--ink); padding: 34px 0 44px; text-align: center;
+    font-size: 14.5px; color: #7a6046;
+  }
+  footer a { color: var(--rust); text-decoration: none; font-weight: 600; }
+  footer a:hover { text-decoration: underline; }
+  footer .glyph { height: 24px; opacity: 0.75; margin-bottom: 12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <img src="/assets/icon.png" alt="" style="height:34px; border-radius:8px;">
+    <span class="word">Managerie</span>
+    <nav>
+      <a href="#how">How it works</a>
+      <a href="#install">Install</a>
+      <a href="#usage">Usage</a>
+      <a href="https://github.com/swairshah/Managerie">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<section class="hero wrap">
+  <img class="icon" src="/assets/icon.png" alt="Managerie app icon — an owl, cat, and bear in circus wagon windows">
+  <h1>A <span class="rust">menagerie</span> of coding agents in&nbsp;your&nbsp;menubar.</h1>
+  <p class="sub">You're running five agent sessions across tmux panes and terminal tabs.
+  Managerie watches all of them — chimes when one finishes and needs you,
+  jumps you to the exact terminal, and lets you reply without leaving what you're doing.</p>
+
+  <div class="agents">
+    <span class="agent-chip pi">pi</span>
+    <span class="agent-chip claude">claude-code</span>
+    <span class="agent-chip codex">codex</span>
+  </div>
+
+  <div>
+    <button class="install-box" onclick="navigator.clipboard.writeText('brew install --cask managerie').then(()=>{document.getElementById('hint').textContent='copied! now go run it →'})">
+      <span class="dollar">$</span> brew install --cask managerie
+    </button>
+    <span class="copy-hint" id="hint">click to copy</span>
+  </div>
+</section>
+
+<section class="shot-section wrap">
+  <div class="shot-frame">
+    <img src="/assets/window.png" alt="Managerie main window — sidebar navigation with a list of live agent sessions, each with jump and voice-reply buttons">
+  </div>
+  <p class="shot-caption">Every live session, one window — jump to its terminal or hold the mic and talk back.</p>
+</section>
+
+<section class="section alt" id="how">
+  <div class="wrap">
+    <p class="kicker">How it works</p>
+    <h2>Notification-first. Interruption-last.</h2>
+    <div class="cards">
+      <div class="card">
+        <span class="emoji">🔔</span>
+        <h3>Chimes only when it matters</h3>
+        <p>The ding means <em>a session finished and is waiting for you</em>. Mid-turn chatter, tool runs, and status flips stay silent. Pick your chime — Pop, Glass, Hero, or fourteen others.</p>
+      </div>
+      <div class="card">
+        <span class="emoji">↗</span>
+        <h3>Jump to the exact terminal</h3>
+        <p>Click a notification or a session row and Managerie focuses the right window, tab, and tmux pane — Ghostty, iTerm2, tmux, zellij, it finds the one.</p>
+      </div>
+      <div class="card">
+        <span class="emoji">🎙</span>
+        <h3>Reply from anywhere</h3>
+        <p>Type a reply into any session from the dropdown, or hold the mic and speak — it's transcribed and injected into the agent's terminal. TTS is there too, off by default.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="spool">
+  <div class="wrap">
+    <p class="kicker">Under the hood</p>
+    <h2>No ports. No servers. Just files.</h2>
+    <div class="split">
+      <div>
+        <p>Agents talk to Managerie by dropping JSON files into a spool directory —
+        an atomic rename makes each event appear fully-formed, a kqueue watch
+        picks it up within milliseconds.</p>
+        <p>No port conflicts, no health checks, no races. If the app isn't running,
+        events queue up on disk and deliver on next launch. The app's heartbeat
+        file tells agents it's alive.</p>
+      </div>
+      <pre><span class="c"># an agent event — that's the whole protocol</span>
+<span class="a">~/.pi/agent/managerie/events/</span>
+  1786704331647-47080-e6ba78.json
+
+{"type": "speak",
+ "text": "Build green — 82 tests passing.",
+ "sourceApp": "claude-code",
+ "pid": 47080}</pre>
+    </div>
+  </div>
+</section>
+
+<section class="section alt" id="install">
+  <div class="wrap">
+    <p class="kicker">Install</p>
+    <h2>Three steps, ninety seconds.</h2>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num"></div>
+        <div>
+          <h3>Install with Homebrew</h3>
+          <p><code>brew install --cask managerie</code> — signed &amp; notarized. Launch it and allow notifications when asked.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num"></div>
+        <div>
+          <h3>Connect your agents</h3>
+          <p>Open the window → <strong>Integrations</strong> → one click per agent.
+          It installs the pi extension, claude-code hooks, and codex notify for you — and can remove them just as cleanly.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num"></div>
+        <div>
+          <h3>Restart your agent sessions</h3>
+          <p>New sessions check in automatically. That's it — go start something long-running and wander off.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section usage" id="usage">
+  <div class="wrap">
+    <p class="kicker">Daily driving</p>
+    <h2>What it feels like</h2>
+    <ul>
+      <li>An agent finishes → <strong>chime + notification</strong>. Click it to land in that terminal.</li>
+      <li>The menubar dropdown shows every session with its <strong>last message</strong> — click a card to expand, type a reply, or hold the mic and talk.</li>
+      <li>Session order is <strong>stable</strong> — rows never shuffle while agents work.</li>
+      <li>Pipe anything into the notification stream from scripts: <code>echo "backup done" | mnote</code></li>
+      <li>Voice output (TTS) exists for the curious — <em>off</em> by default.</li>
+    </ul>
+  </div>
+</section>
+
+<footer>
+  <img class="glyph" src="/assets/menubar-glyph.png" alt="">
+  <p>Made by <a href="https://github.com/swairshah">Swair</a> ·
+  <a href="https://github.com/swairshah/Managerie">Source</a> ·
+  <a href="https://github.com/swairshah/Managerie/issues">Issues</a> ·
+  <a href="https://github.com/swairshah/Managerie/releases">Releases</a></p>
+  <p style="margin-top:8px;">macOS 13+ · works with pi, claude-code &amp; codex</p>
+</footer>
+
+</body>
+</html>
