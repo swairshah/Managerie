@@ -356,51 +356,79 @@ private struct MenuSessionCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Card header (click to expand)
-            Button(action: onToggle) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(title)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-
-                    if let message = lastMessage?.trimmingCharacters(in: .whitespacesAndNewlines), !message.isEmpty {
-                        Text(message.replacingOccurrences(of: "\n", with: " "))
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(isExpanded ? 6 : 2)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .multilineTextAlignment(.leading)
-                    } else if let detail = session.statusDetail, !detail.isEmpty {
-                        Text(detail)
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
+            // Card face: content (click to expand) + always-visible actions
+            HStack(alignment: .center, spacing: 8) {
+                Button(action: onToggle) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(title)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.primary)
                             .lineLimit(1)
+
+                        if let message = lastMessage?.trimmingCharacters(in: .whitespacesAndNewlines), !message.isEmpty {
+                            Text(message.replacingOccurrences(of: "\n", with: " "))
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(isExpanded ? 6 : 2)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .multilineTextAlignment(.leading)
+                        } else if let detail = session.statusDetail, !detail.isEmpty {
+                            Text(detail)
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+
+                        HStack(spacing: 5) {
+                            TagPill(text: session.sourceApp)
+                            TagPill(text: session.activity.label.lowercased())
+                            if session.queuedCount > 0 {
+                                TagPill(text: "\(session.queuedCount) queued")
+                            }
+
+                            Spacer()
+
+                            if let lastAt = session.lastSpokenAt {
+                                Text(relativeFormatter.localizedString(for: lastAt, relativeTo: Date()))
+                                    .font(.system(size: 10.5))
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
 
+                // Always-visible actions — outside the expand button
+                if session.pid != nil {
                     HStack(spacing: 5) {
-                        TagPill(text: session.sourceApp)
-                        TagPill(text: session.activity.label.lowercased())
-                        if session.queuedCount > 0 {
-                            TagPill(text: "\(session.queuedCount) queued")
+                        Button(action: onJump) {
+                            Image(systemName: "arrow.up.forward.square")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 26, height: 24)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .fill(Color.primary.opacity(0.07))
+                                )
                         }
+                        .buttonStyle(PressableIconStyle())
+                        .help("Jump to this agent's terminal")
 
-                        Spacer()
-
-                        if let lastAt = session.lastSpokenAt {
-                            Text(relativeFormatter.localizedString(for: lastAt, relativeTo: Date()))
-                                .font(.system(size: 10.5))
-                                .foregroundStyle(.tertiary)
-                        }
+                        MicButton(
+                            isRecording: isRecordingThis,
+                            onPress: onMicPress,
+                            onRelease: onMicRelease
+                        )
+                        .help("Hold to dictate — speech is transcribed and sent")
                     }
                 }
-                .padding(.horizontal, 11)
-                .padding(.vertical, 9)
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 9)
 
-            // Expanded: reply bar + jump
+            // Expanded: meta + reply bar
             if isExpanded {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 8) {
@@ -413,14 +441,6 @@ private struct MenuSessionCard: View {
                                 .lineLimit(1)
                         }
                         Spacer()
-                        if session.pid != nil {
-                            Button(action: onJump) {
-                                Label("Jump", systemImage: "arrow.up.forward.square")
-                                    .font(.caption2.weight(.medium))
-                            }
-                            .buttonStyle(QuietPillStyle())
-                            .help("Focus this agent's terminal session")
-                        }
                     }
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
@@ -453,13 +473,6 @@ private struct MenuSessionCard: View {
                             .buttonStyle(PressableIconStyle())
                             .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
                             .help("Send to session (Return)")
-
-                            MicButton(
-                                isRecording: isRecordingThis,
-                                onPress: onMicPress,
-                                onRelease: onMicRelease
-                            )
-                            .help("Hold to dictate — speech is transcribed and sent")
                         }
                     }
                 }
