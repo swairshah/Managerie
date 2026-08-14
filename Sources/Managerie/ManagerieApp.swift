@@ -893,6 +893,22 @@ struct SessionRowView: View {
         if let text = session.currentText ?? session.lastSpokenText {
             return text.replacingOccurrences(of: "\n", with: " ")
         }
+        // Live status text is cleared when a session goes idle, which used to
+        // blank the row. History still holds the last thing the agent said, so
+        // the message persists while the session waits.
+        return historyMessage?.replacingOccurrences(of: "\n", with: " ")
+    }
+
+    /// Last message this session produced, straight from persisted history.
+    private var historyMessage: String? {
+        if let pid = session.pid,
+           let entry = monitor.recentHistory.first(where: { $0.pid == pid }) {
+            return entry.text
+        }
+        if let sid = session.sessionId,
+           let entry = monitor.recentHistory.first(where: { $0.sessionId == sid }) {
+            return entry.text
+        }
         return nil
     }
 
@@ -936,7 +952,9 @@ struct SessionRowView: View {
                                 Text(preview)
                                     .font(.system(size: 12.5))
                                     .foregroundStyle(.secondary)
-                                    .lineLimit(isExpanded ? 8 : 2)
+                                    // Hover reveals more of the message without
+                                    // committing to the full expanded card.
+                                    .lineLimit(isExpanded ? 8 : (isHovered ? 6 : 2))
                                     .truncationMode(.tail)
                                     .fixedSize(horizontal: false, vertical: true)
                                     .multilineTextAlignment(.leading)
@@ -998,8 +1016,11 @@ struct SessionRowView: View {
             .padding(.horizontal, 13)
             .padding(.vertical, 10)
 
-            // Expanded: reply bar
-            if isExpanded, session.pid != nil {
+            // Reply bar: shown when expanded, and on hover so you can point at
+            // a row, type, and hit Return without clicking anything. It sticks
+            // around while there's a draft or the field has focus, so moving
+            // the mouse never eats what you were typing.
+            if session.pid != nil, isExpanded || isHovered || inputFocused || !draft.isEmpty {
                 HStack(spacing: 6) {
                     TextField("Message \(session.sourceApp)…", text: $draft)
                         .textFieldStyle(.plain)
@@ -1037,9 +1058,16 @@ struct SessionRowView: View {
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(Color.primary.opacity(isExpanded || isHovered ? 0.06 : 0.03))
         )
+        .animation(.easeOut(duration: 0.15), value: isHovered)
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.15)) {
                 isHovered = hovering
+            }
+            if hovering {
+                // Hover hands the keyboard to this row's field.
+                inputFocused = true
+            } else if draft.trimmingCharacters(in: .whitespaces).isEmpty, !isExpanded {
+                inputFocused = false
             }
         }
     }

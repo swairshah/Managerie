@@ -58,12 +58,20 @@
 
   /* ---------- hero ---------- */
   .hero { padding: 72px 0 56px; text-align: center; }
-  .hero .icon {
+  /* The frame keeps its size; the artwork inside is scaled up and clipped,
+     so the tent reads bigger without the icon growing. */
+  .hero .icon-frame {
+    display: inline-block; overflow: hidden;
     width: 168px; height: 168px; border-radius: 38px;
     border: 3px solid var(--ink);
     box-shadow: 8px 8px 0 var(--ink);
     margin-bottom: 34px;
     background: var(--cream);
+  }
+  .hero .icon {
+    width: 100%; height: 100%; display: block;
+    transform: scale(1.28);
+    transform-origin: center;
   }
   .hero h1 {
     font-size: clamp(38px, 6vw, 60px);
@@ -105,10 +113,18 @@
     display: inline-block; border: 3px solid var(--ink); border-radius: 16px;
     overflow: hidden; box-shadow: 10px 10px 0 var(--amber);
     max-width: 100%;
-    background: #2a2d33;
+    background: var(--cream);
+    vertical-align: top;
   }
   .shot-frame img { display: block; max-width: 100%; height: auto; }
   .shot-caption { margin-top: 20px; font-size: 15px; font-style: italic; color: #7a6046; }
+  /* window + dropdown side by side, stacking on narrow screens */
+  .shot-pair {
+    display: flex; gap: 34px; align-items: flex-start; justify-content: center;
+    flex-wrap: wrap;
+  }
+  .shot-pair .shot-window { flex: 1 1 560px; max-width: 700px; }
+  .shot-pair .shot-drop { flex: 0 1 250px; }
 
   /* ---------- section headings ---------- */
   .kicker {
@@ -201,11 +217,11 @@
 </header>
 
 <section class="hero wrap">
-  <img class="icon" src="/assets/icon.png" alt="Managerie app icon — an owl, cat, and bear in circus wagon windows">
-  <h1>A <span class="rust">menagerie</span> of coding agents in&nbsp;your&nbsp;menubar.</h1>
-  <p class="sub">You're running five agent sessions across tmux panes and terminal tabs.
-  Managerie watches all of them — chimes when one finishes and needs you,
-  jumps you to the exact terminal, and lets you reply without leaving what you're doing.</p>
+  <span class="icon-frame"><img class="icon" src="/assets/icon.png" alt="Managerie app icon — a circus tent"></span>
+  <h1>Manage a <span class="rust">menagerie</span> of coding&nbsp;agents.</h1>
+  <p class="sub">If you are running a handful of agents in terminal, this is for you.
+  Managerie watches over all of them: it chimes when one finishes and needs you,
+  jumps you to the exact terminal, and lets you reply without leaving what you're doing right now.</p>
 
   <div class="agents">
     <span class="agent-chip pi">pi</span>
@@ -222,16 +238,20 @@
 </section>
 
 <section class="shot-section wrap">
-  <div class="shot-frame">
-    <img src="/assets/window.png" alt="Managerie main window — sidebar navigation with a list of live agent sessions, each with jump and voice-reply buttons">
+  <div class="shot-pair">
+    <div class="shot-frame shot-window">
+      <img src="/assets/window.png?v=4" alt="Managerie main window — sidebar navigation with a list of live agent sessions, each with jump and voice-reply buttons">
+    </div>
+    <div class="shot-frame shot-drop">
+      <img src="/assets/dropdown.png?v=4" alt="Managerie menubar dropdown — three agent sessions with their latest message, jump and mic buttons">
+    </div>
   </div>
-  <p class="shot-caption">Every live session, one window — jump to its terminal or hold the mic and talk back.</p>
+  <p class="shot-caption">Every live session, one window — or a glance from the menubar. Jump to its terminal, or hold the mic and dictate a reply.</p>
 </section>
 
 <section class="section alt" id="how">
   <div class="wrap">
     <p class="kicker">How it works</p>
-    <h2>Notification-first. Interruption-last.</h2>
     <div class="cards">
       <div class="card">
         <span class="emoji">🔔</span>
@@ -246,41 +266,15 @@
       <div class="card">
         <span class="emoji">🎙</span>
         <h3>Reply from anywhere</h3>
-        <p>Type a reply into any session from the dropdown, or hold the mic and speak — it's transcribed and injected into the agent's terminal. TTS is there too, off by default.</p>
+        <p>Type a reply into any session from the dropdown, or hold the mic and speak — Apple's on-device recognizer transcribes it and injects it into the agent's terminal. No API keys, nothing leaves your Mac.</p>
       </div>
     </div>
   </div>
 </section>
 
-<section class="section" id="spool">
-  <div class="wrap">
-    <p class="kicker">Under the hood</p>
-    <h2>No ports. No servers. Just files.</h2>
-    <div class="split">
-      <div>
-        <p>Agents talk to Managerie by dropping JSON files into a spool directory —
-        an atomic rename makes each event appear fully-formed, a kqueue watch
-        picks it up within milliseconds.</p>
-        <p>No port conflicts, no health checks, no races. If the app isn't running,
-        events queue up on disk and deliver on next launch. The app's heartbeat
-        file tells agents it's alive.</p>
-      </div>
-      <pre><span class="c"># an agent event — that's the whole protocol</span>
-<span class="a">~/.pi/agent/managerie/events/</span>
-  1786704331647-47080-e6ba78.json
-
-{"type": "speak",
- "text": "Build green — 82 tests passing.",
- "sourceApp": "claude-code",
- "pid": 47080}</pre>
-    </div>
-  </div>
-</section>
-
-<section class="section alt" id="install">
+<section class="section" id="install">
   <div class="wrap">
     <p class="kicker">Install</p>
-    <h2>Three steps, ninety seconds.</h2>
     <div class="steps">
       <div class="step">
         <div class="step-num"></div>
@@ -314,10 +308,10 @@
     <h2>What it feels like</h2>
     <ul>
       <li>An agent finishes → <strong>chime + notification</strong>. Click it to land in that terminal.</li>
-      <li>The menubar dropdown shows every session with its <strong>last message</strong> — click a card to expand, type a reply, or hold the mic and talk.</li>
+      <li>The menubar dropdown shows every session with its <strong>last message</strong> — click a card to expand, type a reply, or hold the mic and dictate.</li>
       <li>Session order is <strong>stable</strong> — rows never shuffle while agents work.</li>
       <li>Pipe anything into the notification stream from scripts: <code>echo "backup done" | mnote</code></li>
-      <li>Voice output (TTS) exists for the curious — <em>off</em> by default.</li>
+      <li>Dictation runs <strong>on-device</strong> — no API keys, no audio leaves your Mac.</li>
     </ul>
   </div>
 </section>
