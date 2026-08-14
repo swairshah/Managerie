@@ -715,6 +715,8 @@ struct SessionsTabView: View {
     @ObservedObject var monitor: VoiceMonitor
     @StateObject private var audioRecorder = AudioRecorder()
     @State private var recordingSessionId: String? = nil
+    /// Which row's reply field owns the keyboard (session id).
+    @FocusState private var focusedRow: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -791,7 +793,8 @@ struct SessionsTabView: View {
                                         monitor.reportVoiceInputStatus("No audio recorded — check microphone permission")
                                     }
                                     recordingSessionId = nil
-                                }
+                                },
+                                focusedRow: $focusedRow
                             )
                         }
                     }
@@ -865,7 +868,12 @@ struct SessionRowView: View {
     @State private var isHovered = false
     @State private var isExpanded = false
     @State private var draft = ""
-    @FocusState private var inputFocused: Bool
+    /// Focus lives in the parent, keyed by session id, so moving the mouse
+    /// from one row to the next hands the keyboard over cleanly. With a
+    /// per-row @FocusState the row being left would resign first responder
+    /// *after* the new row claimed it, and focus fell on the floor.
+    var focusedRow: FocusState<String?>.Binding
+    private var inputFocused: Bool { focusedRow.wrappedValue == session.id }
 
     private static let relativeFormatter: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
@@ -1025,7 +1033,7 @@ struct SessionRowView: View {
                     TextField("Message \(session.sourceApp)…", text: $draft)
                         .textFieldStyle(.plain)
                         .font(.system(size: 12.5))
-                        .focused($inputFocused)
+                        .focused(focusedRow, equals: session.id)
                         .onSubmit(sendDraft)
                         .padding(.horizontal, 9)
                         .padding(.vertical, 6)
@@ -1051,7 +1059,7 @@ struct SessionRowView: View {
                 }
                 .padding(.horizontal, 13)
                 .padding(.bottom, 11)
-                .onAppear { inputFocused = true }
+                .onAppear { focusedRow.wrappedValue = session.id }
             }
         }
         .background(
@@ -1064,10 +1072,16 @@ struct SessionRowView: View {
                 isHovered = hovering
             }
             if hovering {
-                // Hover hands the keyboard to this row's field.
-                inputFocused = true
-            } else if draft.trimmingCharacters(in: .whitespaces).isEmpty, !isExpanded {
-                inputFocused = false
+                // Hover hands the keyboard to this row's field. Deferred so the
+                // field exists (it's revealed by this same hover) before focus
+                // lands on it.
+                DispatchQueue.main.async { focusedRow.wrappedValue = session.id }
+            } else if inputFocused, draft.trimmingCharacters(in: .whitespaces).isEmpty, !isExpanded {
+                // Only give up focus if it's still ours — another row may have
+                // already taken it as the pointer moved across.
+                DispatchQueue.main.async {
+                    if focusedRow.wrappedValue == session.id { focusedRow.wrappedValue = nil }
+                }
             }
         }
     }
