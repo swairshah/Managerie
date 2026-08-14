@@ -154,7 +154,6 @@ struct StatusBarContentView: View {
             }
         }
         .frame(width: 360)
-        .background(MenuWindowTopPin())
         .onAppear { monitor.start() }
     }
 
@@ -511,74 +510,6 @@ private struct TagPill: View {
             .padding(.horizontal, 5)
             .padding(.vertical, 1)
             .background(Capsule().fill(Color.primary.opacity(0.07)))
-    }
-}
-
-// MARK: - Window Top Pin
-
-/// The MenuBarExtra panel resizes from its bottom-left origin, so growing
-/// content pushes the window up behind the menu bar. This accessor pins the
-/// window's top edge: whenever the panel resizes, the origin is shifted so the
-/// top stays where the system placed it.
-private struct MenuWindowTopPin: NSViewRepresentable {
-    final class Coordinator {
-        weak var window: NSWindow?
-        var topY: CGFloat?
-        var isAdjusting = false
-        var resizeObserver: NSObjectProtocol?
-        var moveObserver: NSObjectProtocol?
-
-        deinit {
-            if let resizeObserver { NotificationCenter.default.removeObserver(resizeObserver) }
-            if let moveObserver { NotificationCenter.default.removeObserver(moveObserver) }
-        }
-    }
-
-    func makeCoordinator() -> Coordinator { Coordinator() }
-
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView()
-        DispatchQueue.main.async { attach(view, context.coordinator) }
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async { attach(nsView, context.coordinator) }
-    }
-
-    private func attach(_ view: NSView, _ coordinator: Coordinator) {
-        guard coordinator.resizeObserver == nil, let window = view.window else { return }
-        coordinator.window = window
-        coordinator.topY = window.frame.maxY
-
-        // System-driven moves (opening the panel, screen changes) re-anchor the top.
-        coordinator.moveObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.didMoveNotification, object: window, queue: .main
-        ) { _ in
-            guard !coordinator.isAdjusting, let window = coordinator.window else { return }
-            coordinator.topY = window.frame.maxY
-        }
-
-        // Content-driven resizes keep the top edge fixed. The move is deferred
-        // to the next runloop turn: repositioning the window *during* its own
-        // resize notification reenters AppKit's layout pass and leaves the
-        // hosting view centred inside an oversized panel (the giant blank
-        // margins bug). Only the origin is touched — never the size, so SwiftUI
-        // keeps full control of the panel's height.
-        coordinator.resizeObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.didResizeNotification, object: window, queue: .main
-        ) { _ in
-            guard !coordinator.isAdjusting else { return }
-            coordinator.isAdjusting = true
-            DispatchQueue.main.async {
-                defer { coordinator.isAdjusting = false }
-                guard let window = coordinator.window, let topY = coordinator.topY else { return }
-                var frame = window.frame
-                guard abs(frame.maxY - topY) > 0.5 else { return }
-                frame.origin.y = topY - frame.height
-                window.setFrameOrigin(frame.origin)
-            }
-        }
     }
 }
 
