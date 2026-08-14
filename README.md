@@ -1,8 +1,8 @@
 # <img src="Resources/icons/app-icon.png" alt="Managerie icon" width="34" align="center" /> Managerie
 
-Managerie is a macOS menu bar app that acts as a local voice hub.
+Managerie is a macOS menu bar app that keeps your menagerie of coding agents in one place — Pi, Codex, Claude Code, or any other local agent.
 
-It's great with Pi, but it's not Pi-only any app can send text to Managerie's local broker and have it spoken through the same centralized queue + playback system.
+Agents send messages to Managerie's local broker; Managerie surfaces them as macOS notifications, tracks live agent status in the menu bar, lets you **jump** straight to any agent's terminal session, and lets you **dictate** replies (speech → text) into a session. Optional voice playback (TTS) can be enabled on top.
 
 | Managerie macOS menu bar app | Managerie iOS companion app |
 |---|---|
@@ -33,17 +33,17 @@ pi install npm:@jademind/pi-telemetry
 
 ## What this app does
 
-- Runs a local speech broker on `127.0.0.1:18091` (NDJSON over TCP)
-- Accepts `speak`, `health`, and `stop` commands from any local client
-- Queues and coordinates playback so multiple sources can share one voice pipeline
-- Streams low-latency TTS audio
-- Supports cloud providers (ElevenLabs / Google / Deepgram) and optional on-device local TTS
-- Shows live status in the menu bar
-- Supports instant stop (including global **Cmd+.**)
-- Keeps request history (queued / playing / played / interrupted / failed)
+- Runs a local agent broker on `127.0.0.1:18091` (NDJSON over TCP)
+- Accepts `speak` (message), `status`, `health`, and `stop` commands from any local client
+- **Notification-first**: agent messages appear in Notification Center — click one to jump to that agent's terminal session
+- Shows live agent status in the menu bar (thinking / editing / running / waiting …)
+- **Jump**: focuses the right terminal window/pane for a session (Ghostty, iTerm2, Terminal, tmux, zellij)
+- **Dictate**: record audio, transcribe to text (speech-to-text), and send it into an agent session
+- Keeps request history (queued / notified / played / interrupted / failed)
+- Optional voice playback (TTS, off by default): cloud providers (ElevenLabs / Google / Deepgram) or on-device local TTS
 - Optional remote WebSocket control API for iOS/phone clients (`ws://<host>:18092/ws`)
 
-## Use it as a voice hub (from any app)
+## Use it as an agent hub (from any app)
 
 Example broker call:
 
@@ -118,8 +118,9 @@ open .build/Managerie.app
 ## Requirements
 
 - macOS 13+
-- `ffplay` for playback (`brew install ffmpeg`)
-- For cloud mode: ElevenLabs API key (`ELEVEN_API_KEY` / `ELEVENLABS_API_KEY`), Google TTS API key (`GOOGLE_TTS_API_KEY`), or Deepgram API key (`DEEPGRAM_API_KEY` / `DEEPGRAM_TTS_API_KEY`)
+- Accessibility permission for jump-to-session; microphone permission for dictation
+- Only if voice playback (TTS) is enabled: `ffplay` (`brew install ffmpeg`)
+- For cloud TTS mode: ElevenLabs API key (`ELEVEN_API_KEY` / `ELEVENLABS_API_KEY`), Google TTS API key (`GOOGLE_TTS_API_KEY`), or Deepgram API key (`DEEPGRAM_API_KEY` / `DEEPGRAM_TTS_API_KEY`)
 - For local mode: `pocket-tts-cli` runtime plus model files (either bundled in full builds or downloaded on first use from the matching Managerie GitHub release model asset)
 
 ## Related projects

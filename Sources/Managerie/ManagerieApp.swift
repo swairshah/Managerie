@@ -80,6 +80,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // Voice playback master switch — Managerie is notification-first; TTS is opt-in (default off).
+    var ttsEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "ttsEnabled") }
+        set { UserDefaults.standard.set(newValue, forKey: "ttsEnabled") }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Ignore SIGPIPE — writing to a closed socket/pipe must not crash the app.
         signal(SIGPIPE, SIG_IGN)
@@ -117,6 +123,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Menu bar is now handled by SwiftUI MenuBarExtra
         setupKeyboardShortcuts()
         updateDockIconVisibility()
+
+        // Notification-first: register categories + request authorization.
+        AgentNotificationManager.shared.setup()
 
         speechCoordinator = SpeechPlaybackCoordinator(
             defaultVoiceProvider: { [weak self] in self?.selectedVoice ?? "ally" }
@@ -357,6 +366,7 @@ enum RequestPlaybackStatus: String, Codable {
     case queued
     case playing
     case played
+    case notified
     case interrupted
     case cancelled
     case failed
@@ -366,6 +376,7 @@ enum RequestPlaybackStatus: String, Codable {
         case .queued: return "Queued"
         case .playing: return "Playing"
         case .played: return "Played"
+        case .notified: return "Notified"
         case .interrupted: return "Interrupted"
         case .cancelled: return "Cancelled"
         case .failed: return "Failed"
@@ -381,6 +392,7 @@ enum RequestPlaybackStatus: String, Codable {
         case .queued: return .secondary
         case .playing: return .blue
         case .played: return .green
+        case .notified: return .green
         case .interrupted: return .orange
         case .cancelled: return .orange
         case .failed: return .red
@@ -794,25 +806,41 @@ final class SpeechPlaybackCoordinator {
             return state().pending
         }
 
-        let processed = PostProcessingRuleStore.shared
-            .apply(to: trimmed)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !processed.isEmpty else {
-            return state().pending
-        }
-
         let key = queueKey(sourceApp: sourceApp, sessionId: sessionId)
 
         return queue.sync {
             let resolvedVoice = resolveVoiceForQueueLocked(requestedVoice: voice, queueKey: key)
 
             let historyEntryId = RequestHistoryStore.shared.add(
-                text: processed,
+                text: trimmed,
                 voice: resolvedVoice,
                 sourceApp: sourceApp,
                 sessionId: sessionId,
                 pid: pid
             )
+
+            // Notification-first: surface every agent message as a user notification.
+            AgentNotificationManager.shared.postAgentMessage(
+                text: trimmed,
+                sourceApp: sourceApp,
+                sessionId: sessionId,
+                pid: pid
+            )
+
+            // Voice playback is opt-in — without it Managerie just records + notifies.
+            guard UserDefaults.standard.bool(forKey: "ttsEnabled") else {
+                RequestHistoryStore.shared.updateStatus(id: historyEntryId, to: .notified)
+                return pendingCountLocked() + (isPlaying ? 1 : 0)
+            }
+
+            // Post-processing rules only shape spoken text, never notifications.
+            let processed = PostProcessingRuleStore.shared
+                .apply(to: trimmed)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !processed.isEmpty else {
+                RequestHistoryStore.shared.updateStatus(id: historyEntryId, to: .notified)
+                return pendingCountLocked() + (isPlaying ? 1 : 0)
+            }
 
             let job = SpeechJob(
                 historyEntryId: historyEntryId,
@@ -2534,9 +2562,9 @@ struct SettingsView: View {
                     Label("Settings", systemImage: "gear")
                 }
 
-            PostProcessingTabView()
+            IntegrationsTabView()
                 .tabItem {
-                    Label("Postprocessing", systemImage: "textformat")
+                    Label("Integrations", systemImage: "puzzlepiece.extension")
                 }
 
             HistoryView()
@@ -2574,18 +2602,6 @@ struct SessionsTabView: View {
 
                 Spacer()
 
-                // Speed control
-                HStack(spacing: 4) {
-                    Image(systemName: "hare")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Slider(value: $monitor.speechSpeed, in: 0.7...2.0, step: 0.05)
-                        .frame(width: 80)
-                    Text(String(format: "%.1fx", monitor.speechSpeed))
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                }
-
                 // Server toggle
                 Toggle("", isOn: Binding(
                     get: { monitor.serverEnabled },
@@ -2619,9 +2635,9 @@ struct SessionsTabView: View {
             if monitor.sessions.isEmpty {
                 VStack {
                     Spacer()
-                    Text("No active pi sessions")
+                    Text("No active agent sessions")
                         .foregroundStyle(.secondary)
-                    Text("Start a pi session to see it here")
+                    Text("Start pi, claude-code, or codex — sessions appear here")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                     Spacer()
@@ -2764,17 +2780,6 @@ struct SessionRowView: View {
                         .foregroundStyle(.tertiary)
                     }
 
-                    if let voice = session.voice {
-                        Label {
-                            Text(voice)
-                                .font(.caption2)
-                        } icon: {
-                            Image(systemName: "waveform")
-                                .font(.system(size: 8))
-                        }
-                        .foregroundStyle(.tertiary)
-                    }
-
                     if session.queuedCount > 0 {
                         Label {
                             Text("\(session.queuedCount) queued")
@@ -2896,6 +2901,8 @@ struct SettingsTabView: View {
     @AppStorage("elevenLabsApiKey") var elevenLabsApiKey = ""
     @AppStorage("googleTtsApiKey") var googleApiKey = ""
     @AppStorage("deepgramApiKey") var deepgramApiKey = ""
+    @AppStorage("ttsEnabled") var ttsEnabled = false
+    @AppStorage("notificationsEnabled") var notificationsEnabled = true
     @AppStorage("launchAtLogin") var launchAtLogin = false
     @AppStorage("showDockIcon") var showDockIcon = true
     @State private var isPreviewPlaying = false
@@ -3054,6 +3061,26 @@ struct SettingsTabView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
+                // NOTIFICATIONS (primary channel)
+                Group {
+                    SettingsSectionHeader(title: "Notifications")
+
+                    SettingsRow("Show Notifications", subtitle: "Agent messages appear in Notification Center — click one to jump to its session") {
+                        Toggle("", isOn: $notificationsEnabled)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                    }
+
+                    SettingsRow("Voice Playback (TTS)", subtitle: "Optional: also speak agent messages aloud") {
+                        Toggle("", isOn: $ttsEnabled)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                    }
+                }
+
+                if ttsEnabled {
                 // TTS PROVIDER
                 SettingsSectionHeader(title: "TTS Provider")
 
@@ -3265,6 +3292,8 @@ struct SettingsTabView: View {
                         .controlSize(.small)
                         .disabled(isPreviewPlaying || !hasApiKey || (currentProvider == .local && (!localRuntimeAvailable || !localModelInstalled)))
                     }
+                }
+
                 }
 
                 // GENERAL
@@ -4047,11 +4076,6 @@ struct HistoryView: View {
                 .foregroundColor(.primary.opacity(0.9))
 
             HStack(spacing: 8) {
-                if let voice = entry.voice, !voice.isEmpty {
-                    Label(voice, systemImage: "waveform")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
                 if let sessionId = normalizedSessionId(entry.sessionId) {
                     Label(String(sessionId.prefix(8)), systemImage: "number")
                         .font(.system(.caption2, design: .monospaced))
@@ -4090,22 +4114,25 @@ struct HelpView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                helpSection(title: "Using Managerie with Pi Agent", icon: "terminal") {
+                helpSection(title: "Connecting Your Agents", icon: "terminal") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("How to use Managerie with the pi.dev agent:")
+                        Text("Managerie works with pi, claude-code, and codex:")
                             .font(.callout)
                             .foregroundColor(.secondary)
 
                         VStack(alignment: .leading, spacing: 4) {
                             Text("1. Keep Managerie running in the menu bar.")
-                            Text("2. Install the extension in Pi.")
-                            Text("3. Ask Pi to respond normally — the extension routes <voice> content to Managerie.")
-                            Text("4. Use Pi commands to control playback.")
+                            Text("2. Open the Integrations tab and install the connectors you use.")
+                            Text("3. Restart your agent sessions — their messages appear as notifications.")
+                            Text("4. Click a session in the menu bar to reply by text or voice.")
                         }
                         .font(.caption)
                         .foregroundColor(.secondary)
 
-                        CodeRow(code: "pi install npm:@swairshah/managerie", description: "Install extension")
+                        Text("Pi-only commands (with the extension installed):")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .padding(.top, 4)
 
                         VStack(alignment: .leading, spacing: 4) {
                             CodeRow(code: "/tts", description: "Toggle TTS on/off")

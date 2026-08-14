@@ -9,6 +9,10 @@ final class SendHandler {
     }
     
     private static let inboxBaseDir = (NSHomeDirectory() as NSString).appendingPathComponent(".pi/agent/managerie-inbox")
+
+    /// Legacy inbox watched by the older pi-talk extension. We dual-write so
+    /// sessions still running that extension receive messages too.
+    private static let legacyInboxBaseDir = (NSHomeDirectory() as NSString).appendingPathComponent(".pi/agent/pitalk-inbox")
     
     static func send(pid: Int?, tty: String?, mux: String?, text: String, completion: @escaping (SendResult) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
@@ -25,36 +29,48 @@ final class SendHandler {
         }
         
         print("SendHandler: sending to PID \(pid) via inbox")
-        
-        // Write message to the pi session's inbox
-        let inboxDir = (inboxBaseDir as NSString).appendingPathComponent("\(pid)")
-        
-        // Ensure inbox directory exists
-        do {
-            try FileManager.default.createDirectory(atPath: inboxDir, withIntermediateDirectories: true)
-        } catch {
-            return SendResult(success: false, message: "Failed to create inbox: \(error.localizedDescription)")
-        }
-        
-        // Create message file
+
         let timestamp = Int(Date().timeIntervalSince1970 * 1000)
         let random = String(format: "%06x", Int.random(in: 0..<0xFFFFFF))
         let filename = "\(timestamp)-\(random).json"
-        let filePath = (inboxDir as NSString).appendingPathComponent(filename)
-        
+
         let message: [String: Any] = [
             "text": text,
             "timestamp": ISO8601DateFormatter().string(from: Date()),
             "from": "Managerie"
         ]
-        
+
+        let data: Data
         do {
-            let data = try JSONSerialization.data(withJSONObject: message, options: .prettyPrinted)
-            try data.write(to: URL(fileURLWithPath: filePath))
-            print("SendHandler: wrote message to \(filePath)")
-            return SendResult(success: true, message: "Sent via inbox")
+            data = try JSONSerialization.data(withJSONObject: message, options: .prettyPrinted)
         } catch {
-            return SendResult(success: false, message: "Failed to write message: \(error.localizedDescription)")
+            return SendResult(success: false, message: "Failed to encode message: \(error.localizedDescription)")
         }
+
+        // Write to the Managerie inbox and, if present, the legacy pi-talk inbox
+        // (sessions running the old extension watch the legacy path).
+        var wroteAny = false
+        var lastError: String?
+
+        for base in [inboxBaseDir, legacyInboxBaseDir] {
+            // Only create the legacy tree if the old extension has ever used it.
+            if base == legacyInboxBaseDir && !FileManager.default.fileExists(atPath: base) { continue }
+
+            let inboxDir = (base as NSString).appendingPathComponent("\(pid)")
+            let filePath = (inboxDir as NSString).appendingPathComponent(filename)
+            do {
+                try FileManager.default.createDirectory(atPath: inboxDir, withIntermediateDirectories: true)
+                try data.write(to: URL(fileURLWithPath: filePath))
+                print("SendHandler: wrote message to \(filePath)")
+                wroteAny = true
+            } catch {
+                lastError = error.localizedDescription
+            }
+        }
+
+        if wroteAny {
+            return SendResult(success: true, message: "Sent via inbox")
+        }
+        return SendResult(success: false, message: "Failed to write message: \(lastError ?? "unknown error")")
     }
 }

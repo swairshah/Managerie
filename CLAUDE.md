@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Managerie is a macOS menu bar application that provides centralized text-to-speech queuing and playback via a TCP broker. It streams audio from the ElevenLabs API and plays it via `ffplay`. Designed for the Pi coding agent but usable by any local app.
+Managerie is a macOS menu bar application that acts as a notification hub for local coding agents (Pi, Codex, Claude Code, …). Agents send messages/status to a local TCP broker; Managerie surfaces messages as macOS user notifications (click → jump to the agent's terminal session), shows live agent status, and supports dictation (speech→text) into sessions. Voice playback (TTS via ElevenLabs/Google/Deepgram/local, played through `ffplay`) still exists but is opt-in, gated by the `ttsEnabled` UserDefaults flag (default **off**).
 
 ## Build & Run Commands
 
@@ -53,9 +53,11 @@ TypeScript npm package (`@swairshah/managerie`) for the Pi coding agent. Extract
 ## Key Patterns
 
 - Debug logging gated by `MANAGERIE_DEBUG=1` env var (duplicated `fileprivate let debugEnabled` in multiple files)
-- UserDefaults for settings (voice, API key, server enabled stored inverted as "serverDisabled", speech speed, dock icon, launch at login)
+- UserDefaults for settings (voice, API key, server enabled stored inverted as "serverDisabled", speech speed, dock icon, launch at login, `ttsEnabled` master TTS switch — default false, `notificationsEnabled` — default true)
+- **AgentNotificationManager** (`NotificationManager.swift`) — posts UNUserNotifications for agent messages; notification tap / "Jump to Session" action calls `JumpHandler.jump(to:)`. Every `speak` request is notified; playback only happens when `ttsEnabled` is true (otherwise history entries get status `.notified`)
 - `LSUIElement=true` — menu bar app, dock icon is toggleable
 - App bundle ID: `com.managerie.app`
+- Notification-first flow: broker `speak` → history + notification → (optional) TTS queue
 - ElevenLabs voices: `ally` (default), `dorothy`, `lily`, `alice`, `dave`, `joseph` using `eleven_flash_v2_5` model
 - Local Pocket TTS voices: `alba`, `vera`, `paul`, `charles`, `michael`, `anna`, `fantine`, `eponine`, `cosette`, `eve`, `george`, `mary`, `marius`, `javert`, `azelma`, `caro_davy`, `peter_yearsley`, `stuart_bell`
 - Requires `ffplay` (ffmpeg) for audio playback and Accessibility permissions for terminal focusing
