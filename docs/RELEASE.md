@@ -1,15 +1,16 @@
-# Releasing Loqui
+# Releasing Managerie
 
-This project now has an automated release script:
+Releases are automated by a single script:
 
 ```bash
-./scripts/release.sh <version>
+./scripts/release.sh <version>              # full release
+./scripts/release.sh <version> --skip-notarize   # local test build, no Apple round-trip
 ```
 
 Example:
 
 ```bash
-./scripts/release.sh 1.2.0
+./scripts/release.sh 1.3.0
 ```
 
 ---
@@ -18,83 +19,52 @@ Example:
 
 `scripts/release.sh` will:
 
-1. Update `CFBundleShortVersionString` in `scripts/build-app.sh`
-2. Build Loqui + `mnote`
-3. Bundle `pocket-tts-cli` + model files into `.build/Loqui.app`
-4. Sign the app
-5. Zip to `dist/Loqui-<version>.zip`
-6. Notarize with Apple (`xcrun notarytool`) and staple ticket
-7. Re-zip stapled app
-8. Zip pi extension to `dist/managerie-<version>.zip`
-9. Print SHA256 and update `~/work/projects/homebrew-tap/Casks/loqui.rb` (if present)
+1. Update `VERSION` in `scripts/build-app.sh`
+2. Build a universal (arm64 + x86_64) app bundle via `scripts/build-app.sh --universal` (Managerie + `mnote`)
+3. Sign the bundle with hardened runtime and entitlements
+   (`Sources/Managerie/Managerie.entitlements` — required for microphone
+   access and Apple events; the script fails if the `audio-input`
+   entitlement is missing from the signature)
+4. Notarize the app with Apple (`xcrun notarytool`) and staple the ticket
+5. Create a DMG (`create-dmg`, falling back to `hdiutil`), sign, notarize, and staple it → `dist/Managerie-<version>.dmg`
+6. Zip the pi extension → `dist/managerie-<version>.zip`
+7. Print the DMG SHA256 and update `~/work/projects/homebrew-tap/Casks/managerie.rb` (if present)
+8. Interactively (each step asks Y/n):
+   - Commit the version bump
+   - Create and push git tag `v<version>` (pushes `main` too)
+   - Create the GitHub release with the DMG + extension zip (`gh release create`)
+   - Commit and push the Homebrew tap update
 
 ---
 
 ## Prerequisites
 
-- Apple notarization credentials stored in keychain profile used by script (`AC_PASSWORD`)
-- Developer ID signing identity available on your machine
-- `gh` CLI installed (for GitHub release step)
-
-Optional one-time setup:
-
-```bash
-xcrun notarytool store-credentials "AC_PASSWORD" \
-  --apple-id "<apple-id>" \
-  --team-id "8B9YURJS4G" \
-  --password "<app-specific-password>"
-```
-
----
-
-## Manual steps after script completes
-
-### 1) Create and push git tag
-
-```bash
-VERSION="1.2.0"
-
-git tag -a v${VERSION} -m "Release v${VERSION}"
-git push origin v${VERSION}
-```
-
-### 2) Create GitHub release
-
-```bash
-VERSION="1.2.0"
-
-gh release create v${VERSION} \
-  dist/Loqui-${VERSION}.zip \
-  dist/managerie-${VERSION}.zip \
-  --title "Loqui v${VERSION}" \
-  --notes "Release notes"
-```
-
-### 3) Push Homebrew tap update
-
-```bash
-cd ~/work/projects/homebrew-tap
-git add Casks/loqui.rb
-git commit -m "Update loqui to ${VERSION}"
-git push
-```
+- Developer ID Application certificate in the keychain
+  (`Developer ID Application: Swair Rajesh Shah (8B9YURJS4G)`)
+- `APPLE_APP_PASSWORD` (app-specific password) in `~/.env` — or use `--skip-notarize`
+- `create-dmg` (`brew install create-dmg`; the script installs it if missing)
+- `gh` CLI for the GitHub release step (optional; skipped if absent)
 
 ---
 
 ## pi extension (npm)
 
 The script only creates `dist/managerie-<version>.zip`.
-Publishing `@swairshah/managerie` to npm is a separate step and can be done later.
+Publishing `@swairshah/managerie` to npm is a separate step:
+
+```bash
+cd Extensions/managerie
+npm publish --access public
+```
 
 ---
 
 ## Post-install notes for users
 
-After `brew install loqui`:
+After `brew install --cask swairshah/tap/managerie`:
 
-1. Open Loqui.app (menu bar app)
-2. In Pi, install extension:
-   ```bash
-   pi install npm:@swairshah/managerie
-   ```
-3. Restart Pi if needed so extension loads
+1. Open Managerie.app (menu bar app)
+2. Agent integrations (pi / Claude Code / Codex) are installed automatically
+   on first launch; removal from Settings is sticky and won't reinstall
+3. Grant microphone (dictation) and Accessibility (terminal focusing)
+   permissions when prompted
