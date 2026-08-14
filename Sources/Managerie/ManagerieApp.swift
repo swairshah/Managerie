@@ -2977,13 +2977,14 @@ struct SessionRowView: View {
     }
 }
 
-/// Small monochrome agent identity glyph — anchors each session row.
+/// Small agent identity glyph — anchors each session row.
+/// pi gets its pixel wordmark; other agents get a quiet two-letter mark.
 struct AgentGlyph: View {
     let sourceApp: String
 
-    private var symbol: String {
+    private var textSymbol: String? {
         switch sourceApp.lowercased() {
-        case "pi": return "π"
+        case "pi": return nil  // pixel mark
         case "claude-code", "claude": return "cl"
         case "codex": return "cx"
         case "mnote": return "mn"
@@ -2992,14 +2993,56 @@ struct AgentGlyph: View {
     }
 
     var body: some View {
-        Text(symbol)
-            .font(.system(size: 12, weight: .semibold, design: .rounded))
-            .foregroundStyle(.secondary)
-            .frame(width: 28, height: 28)
-            .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(Color.primary.opacity(0.06))
-            )
+        Group {
+            if let textSymbol {
+                Text(textSymbol)
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.secondary)
+            } else {
+                PiMarkShape()
+                    .fill(Color.secondary)
+                    .frame(width: 13, height: 13)
+            }
+        }
+        .frame(width: 28, height: 28)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Color.primary.opacity(0.06))
+        )
+    }
+}
+
+/// Pi's pixel wordmark — a 4×4 cell grid forming "Pi".
+/// Drawn as a shape so it stays crisp at any size and tints like text.
+struct PiMarkShape: Shape {
+    /// Filled cells (col, row) of the mark:
+    /// ███·   P top bar
+    /// █·█·   bowl sides
+    /// ██·█   bowl bottom + i
+    /// █··█   stem + i
+    static let cells: [(col: Int, row: Int)] = [
+        (0, 0), (1, 0), (2, 0),
+        (0, 1), (2, 1),
+        (0, 2), (1, 2), (3, 2),
+        (0, 3), (3, 3),
+    ]
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let cell = min(rect.width, rect.height) / 4
+        let originX = rect.midX - cell * 2
+        let originY = rect.midY - cell * 2
+        // Cells overlap by a hair to avoid antialiased seams between neighbors.
+        let bleed = cell * 0.02
+        for (col, row) in Self.cells {
+            path.addRect(CGRect(
+                x: originX + CGFloat(col) * cell,
+                y: originY + CGFloat(row) * cell,
+                width: cell + bleed,
+                height: cell + bleed
+            ))
+        }
+        return path
     }
 }
 

@@ -96,18 +96,21 @@ struct MainWindowView: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 2) {
-            // Identity — sits below the traffic lights
-            HStack(spacing: 8) {
-                Image(nsImage: NSApp.applicationIconImage ?? NSImage())
+            // Identity — same glyph as the menubar dropdown, below the traffic lights
+            HStack(spacing: 9) {
+                Image("MenuBarIconOff", bundle: .module)
+                    .renderingMode(.template)
                     .resizable()
-                    .frame(width: 26, height: 26)
+                    .aspectRatio(contentMode: .fit)
+                    .frame(height: 22)
+                    .foregroundStyle(.primary)
                 Text("Managerie")
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.system(size: 16, weight: .semibold))
                 Spacer()
             }
             .padding(.horizontal, 14)
-            .padding(.top, 44)
-            .padding(.bottom, 14)
+            .padding(.top, 46)
+            .padding(.bottom, 16)
 
             ForEach(MainPane.allCases) { item in
                 SidebarItem(
