@@ -45,6 +45,8 @@ final class AgentNotificationManager: NSObject, UNUserNotificationCenterDelegate
     static let shared = AgentNotificationManager()
 
     private static let enabledKey = "notificationsEnabled"
+    private static let chimeEnabledKey = "notificationChimeEnabled"
+    private static let onlyWhenIdleKey = "notifyOnlyWhenIdle"
     static let soundKey = "notificationSound"
     private let jumpActionId = "MANAGERIE_JUMP"
     private let categoryId = "MANAGERIE_AGENT_MESSAGE"
@@ -56,6 +58,24 @@ final class AgentNotificationManager: NSObject, UNUserNotificationCenterDelegate
             return UserDefaults.standard.bool(forKey: enabledKey)
         }
         set { UserDefaults.standard.set(newValue, forKey: enabledKey) }
+    }
+
+    /// Whether the idle chime plays. Independent of banner notifications.
+    /// Defaults to true.
+    static var chimeEnabled: Bool {
+        get {
+            if UserDefaults.standard.object(forKey: chimeEnabledKey) == nil { return true }
+            return UserDefaults.standard.bool(forKey: chimeEnabledKey)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: chimeEnabledKey) }
+    }
+
+    /// When true, banners are only posted for messages that arrive as a
+    /// session goes idle (the final message of a turn) — mid-turn messages
+    /// (e.g. streaming TTS chunks) stay silent. Defaults to false.
+    static var notifyOnlyWhenIdle: Bool {
+        get { UserDefaults.standard.bool(forKey: onlyWhenIdleKey) }
+        set { UserDefaults.standard.set(newValue, forKey: onlyWhenIdleKey) }
     }
 
     /// Chime played alongside each agent notification. Defaults to Pop.
@@ -87,7 +107,7 @@ final class AgentNotificationManager: NSObject, UNUserNotificationCenterDelegate
     private let chimeDebounce: TimeInterval = 8
 
     func chimeForIdle(pid: Int?) {
-        guard Self.notificationsEnabled else { return }
+        guard Self.chimeEnabled else { return }
 
         let key = pid ?? -1
         let now = Date()
@@ -134,9 +154,55 @@ final class AgentNotificationManager: NSObject, UNUserNotificationCenterDelegate
         }
     }
 
+    /// Human-friendly notification subtitle: prefer the project name reported
+    /// by the agent's status events; fall back to the sessionId only when it's
+    /// readable (raw UUIDs are noise, so they're dropped).
+    static func friendlySubtitle(sessionId: String?, pid: Int?) -> String? {
+        if let pid, let agent = AgentStatusStore.shared.agent(pid: pid),
+           let project = agent.project, !project.isEmpty {
+            return project
+        }
+        guard let sessionId, !sessionId.isEmpty else { return nil }
+        if isUUIDLike(sessionId) { return nil }
+        return String(sessionId.prefix(32))
+    }
+
+    /// Matches 8-4-4-4-12 hex UUIDs (e.g. pi session ids).
+    private static func isUUIDLike(_ s: String) -> Bool {
+        s.range(
+            of: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            options: .regularExpression
+        ) != nil
+    }
+
+    /// Whether this message arrives at an idle moment. Status-tracked
+    /// sessions (pi) are idle when their last reported status is idle-like;
+    /// hook-based sessions (claude-code, codex) only message at idle moments,
+    /// so they always count as idle.
+    private static func isIdleMoment(pid: Int?) -> Bool {
+        guard let pid, let agent = AgentStatusStore.shared.agent(pid: pid) else { return true }
+        return AgentStatusStore.idleStatuses.contains(agent.status)
+    }
+
     /// Post an agent message as a user notification.
     func postAgentMessage(text: String, sourceApp: String?, sessionId: String?, pid: Int?) {
-        guard available, Self.notificationsEnabled else { return }
+        guard available else { return }
+
+        // Chime is independent of banners. Only for sessions without live
+        // status tracking — their hooks (claude-code Stop/Notification, codex
+        // notify) fire exactly when the session goes idle. Status-tracked
+        // sessions (pi) chime on the working→idle status transition instead
+        // (AgentStatusStore), so mid-turn messages and TTS chunks stay silent.
+        let hasLiveStatus = pid.map { AgentStatusStore.shared.hasAgent(pid: $0) } ?? false
+        if !hasLiveStatus {
+            chimeForIdle(pid: pid)
+        }
+
+        guard Self.notificationsEnabled else { return }
+        if Self.notifyOnlyWhenIdle, !Self.isIdleMoment(pid: pid) {
+            debugLog("Managerie Notifications: suppressed mid-turn banner (only-when-idle)")
+            return
+        }
 
         let content = UNMutableNotificationContent()
         if let sourceApp, !sourceApp.isEmpty {
@@ -144,8 +210,8 @@ final class AgentNotificationManager: NSObject, UNUserNotificationCenterDelegate
         } else {
             content.title = "Agent"
         }
-        if let sessionId, !sessionId.isEmpty {
-            content.subtitle = String(sessionId.prefix(32))
+        if let subtitle = Self.friendlySubtitle(sessionId: sessionId, pid: pid) {
+            content.subtitle = subtitle
         }
         content.body = text
         content.categoryIdentifier = categoryId
@@ -162,16 +228,6 @@ final class AgentNotificationManager: NSObject, UNUserNotificationCenterDelegate
             if let error {
                 debugLog("Managerie Notifications: failed to post: \(error.localizedDescription)")
             }
-        }
-
-        // Chime only for sessions without live status tracking — their hooks
-        // (claude-code Stop/Notification, codex notify) fire exactly when the
-        // session goes idle. Status-tracked sessions (pi) chime on the
-        // working→idle status transition instead, so mid-turn messages and
-        // TTS chunks stay silent.
-        let hasLiveStatus = pid.map { AgentStatusStore.shared.hasAgent(pid: $0) } ?? false
-        if !hasLiveStatus {
-            chimeForIdle(pid: pid)
         }
     }
 

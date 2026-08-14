@@ -53,7 +53,7 @@ TypeScript npm package (`@swairshah/managerie`) for the Pi coding agent. Extract
 ## Key Patterns
 
 - Debug logging gated by `MANAGERIE_DEBUG=1` env var (duplicated `fileprivate let debugEnabled` in multiple files)
-- UserDefaults for settings (voice, API key, server enabled stored inverted as "serverDisabled", speech speed, dock icon, launch at login, `ttsEnabled` master TTS switch — default false, `notificationsEnabled` — default true)
+- UserDefaults for settings (voice, API key, server enabled stored inverted as "serverDisabled", speech speed, dock icon, launch at login, `ttsEnabled` master TTS switch — default false, `notificationsEnabled` — default true, `notificationChimeEnabled` — default true, `notifyOnlyWhenIdle` — default false)
 - **AgentNotificationManager** (`NotificationManager.swift`) — posts UNUserNotifications for agent messages; notification tap / "Jump to Session" action calls `JumpHandler.jump(to:)`. Every `speak` request is notified; playback only happens when `ttsEnabled` is true (otherwise history entries get status `.notified`)
 - `LSUIElement=true` — menu bar app, dock icon is toggleable
 - App bundle ID: `com.managerie.app`

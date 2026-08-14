@@ -3149,6 +3149,8 @@ struct SettingsTabView: View {
     @AppStorage("deepgramApiKey") var deepgramApiKey = ""
     @AppStorage("ttsEnabled") var ttsEnabled = false
     @AppStorage("notificationsEnabled") var notificationsEnabled = true
+    @AppStorage("notifyOnlyWhenIdle") var notifyOnlyWhenIdle = false
+    @AppStorage("notificationChimeEnabled") var notificationChimeEnabled = true
     @AppStorage(AgentNotificationManager.soundKey) var notificationSoundRaw = NotificationSound.pop.rawValue
     @AppStorage("launchAtLogin") var launchAtLogin = false
     @AppStorage("showDockIcon") var showDockIcon = true
@@ -3320,7 +3322,23 @@ struct SettingsTabView: View {
                     }
 
                     if notificationsEnabled {
-                        SettingsRow("Notification Sound", subtitle: "Chime played when a session finishes and waits for you — not on every message") {
+                        SettingsRow("Only When Idle", subtitle: "Only show the final message when a session finishes — suppress mid-turn notifications") {
+                            Toggle("", isOn: $notifyOnlyWhenIdle)
+                                .labelsHidden()
+                                .toggleStyle(.switch)
+                                .controlSize(.small)
+                        }
+                    }
+
+                    SettingsRow("Notification Sound", subtitle: "Chime played when a session finishes and waits for you — independent of banners") {
+                        Toggle("", isOn: $notificationChimeEnabled)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                    }
+
+                    if notificationChimeEnabled {
+                        SettingsRow("Chime Sound", subtitle: "Which system sound to play") {
                             Picker("", selection: $notificationSoundRaw) {
                                 ForEach(NotificationSound.allCases, id: \.rawValue) { sound in
                                     Text(sound.rawValue).tag(sound.rawValue)

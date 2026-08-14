@@ -75,6 +75,13 @@ final class AgentStatusStore {
         return agents[pid] != nil
     }
 
+    /// Full status snapshot for a pid, if the extension has reported one.
+    func agent(pid: Int) -> AgentStatus? {
+        lock.lock()
+        defer { lock.unlock() }
+        return agents[pid]
+    }
+
     func remove(pid: Int) {
         lock.lock()
         agents.removeValue(forKey: pid)
