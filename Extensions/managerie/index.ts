@@ -118,13 +118,17 @@ type BrokerResponse = {
 };
 
 export default function (pi: ExtensionAPI) {
-  let ttsEnabled = true;       // Master switch - controls everything
+  let ttsEnabled = false;      // Voice mode is opt-in — Managerie is notification-first (/tts to enable)
   let ttsMuted = false;        // Just mute audio, keep voice tags
   let serverReady = false;
   let serverWarningShown = false;  // Only show server warning once per session
   let voiceStyle: "succinct" | "verbose" = "verbose";  // Voice prompt style
   let currentVoice = "auto";  // Current TTS voice ("auto" = let Loqui assign per-session)
   let currentSessionId: string | undefined;
+
+  // Notification-first: track the turn's final assistant text so it can be
+  // forwarded to Managerie as a notification when voice mode is off.
+  let lastAssistantText = "";
 
   // Streaming parser state
   let lastFullText = "";
@@ -542,22 +546,17 @@ export default function (pi: ExtensionAPI) {
     startInboxWatcher();
 
     const ready = await checkServer();
-    if (ttsEnabled) {
-      if (ready) {
-        ctx.ui.notify("🔊 TTS connected", "info");
-        ctx.ui.setStatus("tts", "🔊");
-      } else {
-        if (!serverWarningShown) {
-          ctx.ui.notify(
-            "⚠️ Loqui broker not running. Start/update Loqui.app (or install with: brew install swairshah/tap/loqui)",
-            "warning"
-          );
-          serverWarningShown = true;
-        }
-        ctx.ui.setStatus("tts", "⚠️");
-      }
+    if (ready) {
+      ctx.ui.setStatus("managerie", ttsEnabled ? "🏠🔊" : "🏠");
     } else {
-      ctx.ui.setStatus("tts", "🔇 off");
+      if (!serverWarningShown) {
+        ctx.ui.notify(
+          "⚠️ Managerie is not running — agent notifications and replies are offline.",
+          "warning"
+        );
+        serverWarningShown = true;
+      }
+      ctx.ui.setStatus("managerie", "⚠️");
     }
   });
 
@@ -582,6 +581,7 @@ export default function (pi: ExtensionAPI) {
 
     if (event.message.role === "assistant") {
       resetStreamingState();
+      lastAssistantText = "";
       // Re-check server in case it was started/stopped
       const wasReady = serverReady;
       await checkServer();
@@ -598,8 +598,6 @@ export default function (pi: ExtensionAPI) {
       sendStatus("thinking");
     }
 
-    if (!ttsEnabled || ttsMuted) return;
-
     const msg = event.message;
     if (msg.role !== "assistant") return;
 
@@ -608,6 +606,9 @@ export default function (pi: ExtensionAPI) {
       .map((c) => c.text);
 
     const fullText = textParts.join(" ");
+    lastAssistantText = fullText;
+
+    if (!ttsEnabled || ttsMuted) return;
     void processStreamingText(fullText);
   });
 
@@ -626,6 +627,25 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_end", async (_event, ctx) => {
     lastCtx = ctx;
     sendStatus("done");
+
+    // Notification-first: with voice mode off, forward the turn's final
+    // message so Managerie can surface it as a notification.
+    if (!ttsEnabled) {
+      const text = lastAssistantText.replace(/\s+/g, " ").trim().slice(0, 400);
+      lastAssistantText = "";
+      if (text) {
+        if (!serverReady) await checkServer();
+        if (serverReady) {
+          sendBrokerCommand({
+            type: "speak",
+            text,
+            sourceApp: "pi",
+            sessionId: activeSessionKey(),
+            pid: process.pid,
+          }).catch(() => {});
+        }
+      }
+    }
   });
 
   // Status events: tool execution
