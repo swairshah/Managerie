@@ -2951,6 +2951,7 @@ struct SettingsTabView: View {
     @AppStorage("deepgramApiKey") var deepgramApiKey = ""
     @AppStorage("ttsEnabled") var ttsEnabled = false
     @AppStorage("notificationsEnabled") var notificationsEnabled = true
+    @AppStorage(AgentNotificationManager.soundKey) var notificationSoundRaw = NotificationSound.pop.rawValue
     @AppStorage("launchAtLogin") var launchAtLogin = false
     @AppStorage("showDockIcon") var showDockIcon = true
     @State private var isPreviewPlaying = false
@@ -3118,6 +3119,22 @@ struct SettingsTabView: View {
                             .labelsHidden()
                             .toggleStyle(.switch)
                             .controlSize(.small)
+                    }
+
+                    if notificationsEnabled {
+                        SettingsRow("Notification Sound", subtitle: "Chime played when an agent message arrives") {
+                            Picker("", selection: $notificationSoundRaw) {
+                                ForEach(NotificationSound.allCases, id: \.rawValue) { sound in
+                                    Text(sound.rawValue).tag(sound.rawValue)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(width: 130)
+                            .onChange(of: notificationSoundRaw) { newValue in
+                                // Instant preview of the chosen chime
+                                NotificationSound(rawValue: newValue)?.play()
+                            }
+                        }
                     }
 
                     SettingsRow("Voice Playback (TTS)", subtitle: "Optional: also speak agent messages aloud") {

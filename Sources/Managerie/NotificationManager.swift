@@ -7,6 +7,37 @@ private func debugLog(_ message: String) {
     if notifDebugEnabled { NSLog("%@", message) }
 }
 
+/// Notification chime options — macOS system sounds played via NSSound
+/// (same approach as NotchCom). `none` silences the chime while keeping banners.
+enum NotificationSound: String, CaseIterable {
+    case none = "None"
+    case pop = "Pop"
+    case ping = "Ping"
+    case tink = "Tink"
+    case glass = "Glass"
+    case blow = "Blow"
+    case bottle = "Bottle"
+    case frog = "Frog"
+    case funk = "Funk"
+    case hero = "Hero"
+    case morse = "Morse"
+    case purr = "Purr"
+    case sosumi = "Sosumi"
+    case submarine = "Submarine"
+    case basso = "Basso"
+
+    /// The system sound name for NSSound, or nil for silence.
+    var soundName: String? {
+        self == .none ? nil : rawValue
+    }
+
+    /// Play this sound now (preview or notification chime).
+    func play() {
+        guard let soundName else { return }
+        NSSound(named: soundName)?.play()
+    }
+}
+
 /// Managerie is notification-first: agent messages arrive here and are surfaced
 /// as macOS user notifications. Clicking a notification jumps to the agent's
 /// terminal session via JumpHandler. Voice playback (TTS) is optional on top.
@@ -14,6 +45,7 @@ final class AgentNotificationManager: NSObject, UNUserNotificationCenterDelegate
     static let shared = AgentNotificationManager()
 
     private static let enabledKey = "notificationsEnabled"
+    static let soundKey = "notificationSound"
     private let jumpActionId = "MANAGERIE_JUMP"
     private let categoryId = "MANAGERIE_AGENT_MESSAGE"
 
@@ -24,6 +56,18 @@ final class AgentNotificationManager: NSObject, UNUserNotificationCenterDelegate
             return UserDefaults.standard.bool(forKey: enabledKey)
         }
         set { UserDefaults.standard.set(newValue, forKey: enabledKey) }
+    }
+
+    /// Chime played alongside each agent notification. Defaults to Pop.
+    static var notificationSound: NotificationSound {
+        get {
+            guard let raw = UserDefaults.standard.string(forKey: soundKey),
+                  let sound = NotificationSound(rawValue: raw) else {
+                return .pop
+            }
+            return sound
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: soundKey) }
     }
 
     /// UNUserNotificationCenter requires a real app bundle; guard so a bare
@@ -88,6 +132,13 @@ final class AgentNotificationManager: NSObject, UNUserNotificationCenterDelegate
             if let error {
                 debugLog("Managerie Notifications: failed to post: \(error.localizedDescription)")
             }
+        }
+
+        // Chime via NSSound rather than UNNotificationContent.sound — system
+        // sound names aren't reliably resolvable by UN on macOS, and NSSound
+        // gives the settings picker instant preview with the same code path.
+        DispatchQueue.main.async {
+            Self.notificationSound.play()
         }
     }
 
