@@ -78,7 +78,6 @@ struct ManagerieRemoteServerConfig {
 
 struct ManagerieRemoteSummary: Codable, Equatable {
     let total: Int
-    let speaking: Int
     let queued: Int
     let idle: Int
     let color: String
@@ -96,7 +95,6 @@ struct ManagerieRemoteSession: Codable, Equatable, Identifiable {
     let project: String?
     let currentText: String?
     let queuedCount: Int
-    let voice: String?
     let lastSpokenAtMs: Int64?
     let lastSpokenText: String?
     let cwd: String?
@@ -108,17 +106,10 @@ struct ManagerieRemoteHistoryEntry: Codable, Equatable, Identifiable {
     let id: String
     let timestampMs: Int64
     let text: String
-    let voice: String?
     let sourceApp: String?
     let sessionId: String?
     let pid: Int?
     let status: String
-}
-
-struct ManagerieRemotePlaybackState: Codable, Equatable {
-    let pending: Int
-    let playing: Bool
-    let currentQueue: String?
 }
 
 struct ManagerieRemoteSnapshot: Codable, Equatable {
@@ -126,47 +117,22 @@ struct ManagerieRemoteSnapshot: Codable, Equatable {
     let summary: ManagerieRemoteSummary
     let sessions: [ManagerieRemoteSession]
     let history: [ManagerieRemoteHistoryEntry]
-    let playback: ManagerieRemotePlaybackState
 
     static let empty = ManagerieRemoteSnapshot(
         generatedAtMs: Int64(Date().timeIntervalSince1970 * 1000),
-        summary: ManagerieRemoteSummary(total: 0, speaking: 0, queued: 0, idle: 0, color: "gray", label: "No voice activity"),
+        summary: ManagerieRemoteSummary(total: 0, queued: 0, idle: 0, color: "gray", label: "No sessions"),
         sessions: [],
-        history: [],
-        playback: ManagerieRemotePlaybackState(pending: 0, playing: false, currentQueue: nil)
+        history: []
     )
 }
 
 enum ManagerieRemoteIncomingCommand {
     case sendText(sessionKey: String, text: String, idempotencyKey: String)
     case sendScreenshot(sessionKey: String, imageBase64: String, mimeType: String, note: String?, idempotencyKey: String)
-    case speak(text: String, voice: String?, sourceApp: String?, sessionId: String?, pid: Int?, idempotencyKey: String)
+    /// `speak` is the legacy wire name for "deliver this message"; kept for
+    /// compatibility with existing clients.
+    case speak(text: String, sourceApp: String?, sessionId: String?, pid: Int?, idempotencyKey: String)
     case stop(scope: String?, idempotencyKey: String)
-}
-
-struct ManagerieRemoteAudioStart: Codable, Equatable {
-    let streamId: String
-    let sourceApp: String?
-    let sessionId: String?
-    let pid: Int?
-    let voice: String?
-    let mimeType: String
-}
-
-struct ManagerieRemoteAudioChunk: Codable, Equatable {
-    let streamId: String
-    let chunk: Data
-}
-
-struct ManagerieRemoteAudioEnd: Codable, Equatable {
-    let streamId: String
-    let status: String
-}
-
-enum ManagerieRemoteAudioMirrorEvent {
-    case start(ManagerieRemoteAudioStart)
-    case chunk(ManagerieRemoteAudioChunk)
-    case end(ManagerieRemoteAudioEnd)
 }
 
 struct ManagerieRemoteCommandResult {

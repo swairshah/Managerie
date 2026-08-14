@@ -50,7 +50,6 @@ final class ManagerieRemoteRuntime {
             monitor.start()
             self.server = server
             bindPublishers()
-            wireAudioMirrorHandler()
             publishSnapshotIfChanged(force: true)
         } catch {
             monitor.stop()
@@ -61,7 +60,6 @@ final class ManagerieRemoteRuntime {
     func stop() {
         cancellables.removeAll()
         monitor.stop()
-        appDelegate?.speechCoordinator?.setAudioMirrorHandler(nil)
         server?.stop()
         server = nil
     }
@@ -81,35 +79,12 @@ final class ManagerieRemoteRuntime {
             .sink { [weak self] entries in
                 guard let self else { return }
                 self.publishHistoryDelta(entries)
-                // Defer playback/snapshot publish to avoid re-entrant deadlock:
-                // this sink can fire synchronously from within
-                // SpeechPlaybackCoordinator.enqueue() which holds its queue lock;
-                // publishPlaybackState() and buildSnapshot() call state() which
-                // tries to acquire the same lock → dispatch_sync deadlock.
                 Task { @MainActor [weak self] in
                     guard let self else { return }
-                    self.publishPlaybackState()
                     self.publishSnapshotIfChanged()
                 }
             }
             .store(in: &cancellables)
-    }
-
-    private func wireAudioMirrorHandler() {
-        appDelegate?.speechCoordinator?.setAudioMirrorHandler { [weak self] event in
-            guard let self else { return }
-            Task { @MainActor in
-                guard let server = self.server else { return }
-                switch event {
-                case .start(let payload):
-                    server.publishAudioStart(payload)
-                case .chunk(let payload):
-                    server.publishAudioChunk(payload)
-                case .end(let payload):
-                    server.publishAudioEnd(payload)
-                }
-            }
-        }
     }
 
     private func publishSnapshotIfChanged(force: Bool = false) {
@@ -121,17 +96,6 @@ final class ManagerieRemoteRuntime {
         }
         lastSnapshotFingerprint = fingerprint
         server.publishSessionsUpdated(snapshot)
-    }
-
-    private func publishPlaybackState() {
-        guard let server else { return }
-        let state = appDelegate?.speechCoordinator?.state() ?? (pending: 0, playing: false, currentQueue: nil)
-        let playback = ManagerieRemotePlaybackState(
-            pending: state.pending,
-            playing: state.playing,
-            currentQueue: state.currentQueue
-        )
-        server.publishPlaybackState(playback)
     }
 
     private func publishHistoryDelta(_ entries: [RequestHistoryEntry]) {
@@ -152,25 +116,17 @@ final class ManagerieRemoteRuntime {
         let historyEntries = RequestHistoryStore.shared.entries
         let history = Array(historyEntries.prefix(limitHistory)).map(historyEntry)
 
-        let playbackState = appDelegate?.speechCoordinator?.state() ?? (pending: 0, playing: false, currentQueue: nil)
-
         return ManagerieRemoteSnapshot(
             generatedAtMs: managerieRemoteCurrentTimestampMs(),
             summary: ManagerieRemoteSummary(
                 total: monitor.summary.total,
-                speaking: monitor.summary.speaking,
                 queued: monitor.summary.queued,
                 idle: monitor.summary.idle,
                 color: monitor.summary.color,
                 label: monitor.summary.label
             ),
             sessions: monitor.sessions.map(remoteSession),
-            history: history,
-            playback: ManagerieRemotePlaybackState(
-                pending: playbackState.pending,
-                playing: playbackState.playing,
-                currentQueue: playbackState.currentQueue
-            )
+            history: history
         )
     }
 
@@ -193,7 +149,6 @@ final class ManagerieRemoteRuntime {
             project: session.project,
             currentText: session.currentText,
             queuedCount: session.queuedCount,
-            voice: session.voice,
             lastSpokenAtMs: session.lastSpokenAt.map { Int64($0.timeIntervalSince1970 * 1000) },
             lastSpokenText: session.lastSpokenText,
             cwd: session.cwd,
@@ -207,7 +162,6 @@ final class ManagerieRemoteRuntime {
             id: entry.id.uuidString,
             timestampMs: Int64(entry.timestamp.timeIntervalSince1970 * 1000),
             text: entry.text,
-            voice: entry.voice,
             sourceApp: entry.sourceApp,
             sessionId: entry.sessionId,
             pid: entry.pid,
@@ -217,8 +171,6 @@ final class ManagerieRemoteRuntime {
 
     private func activityCode(_ activity: VoiceActivity) -> String {
         switch activity {
-        case .speaking: return "speaking"
-        case .queued: return "queued"
         case .starting: return "starting"
         case .thinking: return "thinking"
         case .reading: return "reading"
@@ -239,8 +191,8 @@ final class ManagerieRemoteRuntime {
         case .sendScreenshot(let sessionKey, let imageBase64, let mimeType, let note, _):
             return await handleSendScreenshot(sessionKey: sessionKey, imageBase64: imageBase64, mimeType: mimeType, note: note)
 
-        case let .speak(text, voice, sourceApp, sessionId, pid, _):
-            return handleSpeak(text: text, voice: voice, sourceApp: sourceApp, sessionId: sessionId, pid: pid)
+        case let .speak(text, sourceApp, sessionId, pid, _):
+            return handleSpeak(text: text, sourceApp: sourceApp, sessionId: sessionId, pid: pid)
 
         case .stop:
             return handleStop()
@@ -249,34 +201,25 @@ final class ManagerieRemoteRuntime {
 
     private func handleSpeak(
         text: String,
-        voice: String?,
         sourceApp: String?,
         sessionId: String?,
         pid: Int?
     ) -> ManagerieRemoteCommandResult {
-        guard let coordinator = appDelegate?.speechCoordinator else {
-            return .failure(code: "INTERNAL_ERROR", message: "speech coordinator unavailable")
-        }
-
-        let queued = coordinator.enqueue(
+        let delivered = BrokerRequestProcessor.deliver(
             text: text,
-            voice: voice,
             sourceApp: sourceApp ?? "managerie-ios",
             sessionId: sessionId,
             pid: pid
         )
-
-        return .success(payload: ["queued": queued])
+        guard delivered else {
+            return .failure(code: "INVALID_ARGUMENT", message: "Missing text")
+        }
+        return .success()
     }
 
+    /// Retained as a no-op so existing clients don't error.
     private func handleStop() -> ManagerieRemoteCommandResult {
-        appDelegate?.speechCoordinator?.stopAll()
-        let state = appDelegate?.speechCoordinator?.state() ?? (pending: 0, playing: false, currentQueue: nil)
-        return .success(payload: [
-            "pending": state.pending,
-            "playing": state.playing,
-            "currentQueue": state.currentQueue as Any,
-        ])
+        .success()
     }
 
     private func handleSendText(sessionKey: String, text: String) async -> ManagerieRemoteCommandResult {

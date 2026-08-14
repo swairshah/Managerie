@@ -17,7 +17,6 @@ echo -e "${GREEN}=== Managerie Build & Run ===${NC}"
 
 # Kill existing Managerie + embedded server
 pkill -f "$APP_BIN" 2>/dev/null || true
-pkill -f "pocket-tts-cli serve --port 18090" 2>/dev/null || true
 
 # Build debug binaries
 echo -e "${YELLOW}Building (swift build)...${NC}"

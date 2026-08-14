@@ -461,7 +461,7 @@ final class StableOrderingTests: XCTestCase {
         VoiceSession(
             id: id, sourceApp: "pi", sessionId: nil, pid: nil,
             activity: activity, statusDetail: nil, project: nil,
-            currentText: nil, queuedCount: 0, voice: nil,
+            currentText: nil, queuedCount: 0,
             lastSpokenAt: lastSpokenAt, lastSpokenText: nil,
             cwd: nil, tty: nil, mux: nil
         )

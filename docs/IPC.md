@@ -1,9 +1,12 @@
-# Loqui IPC Design (Broker)
+# Managerie IPC Design (Broker)
 
-Loqui exposes a local broker endpoint for centralized queueing and playback:
+Managerie ingests agent events through two transports:
 
-- Address: `127.0.0.1:18091`
-- Protocol: NDJSON over TCP (one JSON object per line)
+- **File spool (primary)** — NDJSON files dropped into `~/.pi/agent/managerie/events/`.
+  No ports, no races. Events written while the app is closed are delivered on
+  its next launch.
+- **TCP broker (compat)** — `127.0.0.1:18091`, NDJSON over TCP (one JSON object
+  per line), for existing clients.
 
 For remote iOS/WebSocket control, see `docs/REMOTE_WS_PROTOCOL.md`.
 
@@ -11,16 +14,22 @@ For remote iOS/WebSocket control, see `docs/REMOTE_WS_PROTOCOL.md`.
 
 ### speak
 
+Delivers an agent message: it's recorded in history and surfaced as a macOS
+notification. Clicking the notification jumps to that agent's session.
+
+> The verb is named `speak` for historical reasons — Managerie used to speak
+> messages aloud. Text-to-speech has been removed; the name is retained so
+> already-installed hooks and extensions keep working.
+
 ```json
-{"type":"speak","text":"Hello","voice":"fantine","sourceApp":"pi","sessionId":"abc","pid":12345}
+{"type":"speak","text":"Hello","sourceApp":"pi","sessionId":"abc","pid":12345}
 ```
 
 Fields:
 - `text` (required)
-- `voice` (optional)
 - `sourceApp` (optional)
 - `sessionId` (optional)
-- `pid` (optional)
+- `pid` (optional) — used to jump to the originating terminal session
 
 ### health
 
@@ -30,15 +39,11 @@ Fields:
 
 ### stop
 
+Accepted and acknowledged, but a no-op — retained so older clients don't error.
+
 ```json
 {"type":"stop"}
-{"type":"stop","sourceApp":"pi"}
-{"type":"stop","sourceApp":"pi","sessionId":"abc"}
 ```
-
-Fields:
-- `sourceApp` (optional) — stop only queues belonging to this app. If omitted, stops all queues globally.
-- `sessionId` (optional) — when combined with `sourceApp`, stops only the specific queue for that session. When omitted, stops all queues for the given `sourceApp`.
 
 ### status
 
@@ -65,37 +70,18 @@ To remove an agent (e.g. on shutdown):
 
 Responses are JSON lines and can include:
 - `ok`
-- `queued`
-- `pending`
-- `playing`
-- `currentQueue`
 - `error`
 
-## Queue model
+## Notification behavior
 
-Queue key is:
+Every `speak` becomes a history entry. Whether it also raises a banner depends
+on settings:
 
-`sourceApp + sessionId`
-
-Rules:
-- Missing session IDs are normalized to a shared `none` session.
-- Each queue key has its own FIFO queue.
-- Scheduler drains the current queue key before moving to the next queue key.
-
-## Voice assignment behavior
-
-If `voice` is omitted in `speak`:
-- Loqui assigns a stable per-queue default from:
-  - `vera`, `paul`, `charles`, `michael`, `anna`, `fantine`, `eponine`, `cosette`, `eve`, `george`, `mary`
-- Loqui tries to keep active queues on distinct voices.
-- If active queues exceed the automatic voice pool, assignment cycles.
-
-If `voice` is provided, it is used directly.
-
-## Microphone-aware behavior
-
-When microphone activity is detected:
-- If Loqui is already speaking: current item is interrupted and queued items are cancelled.
-- If Loqui is not speaking yet: queued playback waits until microphone activity ends.
-
-Detection is done via CoreAudio device-running state for the default input device (no audio capture by Loqui).
+- **Show Notifications** — master switch for banners.
+- **Only When Idle** — suppresses mid-turn messages; only the final message of
+  a turn raises a banner. Sessions reporting live status (pi) are checked
+  against that status; hook-based sessions (claude-code, codex) only send at
+  turn end, so they always qualify.
+- **Notification Sound** — the idle chime, independent of banners. It fires on
+  the working→idle transition for status-tracked sessions, and on message
+  arrival for hook-based ones (debounced per session).

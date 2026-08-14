@@ -2,7 +2,7 @@
 
 Managerie is a macOS menu bar app that keeps your menagerie of coding agents in one place — Pi, Codex, Claude Code, or any other local agent.
 
-Agents send messages to Managerie's local broker; Managerie surfaces them as macOS notifications, tracks live agent status in the menu bar, lets you **jump** straight to any agent's terminal session, and lets you **dictate** replies (speech → text) into a session. Optional voice playback (TTS) can be enabled on top.
+Agents send messages to Managerie's local broker; Managerie surfaces them as macOS notifications, tracks live agent status in the menu bar, lets you **jump** straight to any agent's terminal session, and lets you **dictate** replies (speech → text) into a session.
 
 | Managerie macOS menu bar app | Managerie iOS companion app |
 |---|---|
@@ -38,9 +38,8 @@ pi install npm:@jademind/pi-telemetry
 - **Notification-first**: agent messages appear in Notification Center — click one to jump to that agent's terminal session
 - Shows live agent status in the menu bar (thinking / editing / running / waiting …)
 - **Jump**: focuses the right terminal window/pane for a session (Ghostty, iTerm2, Terminal, tmux, zellij)
-- **Dictate**: record audio, transcribe to text (speech-to-text), and send it into an agent session
+- **Dictate**: record audio, transcribe on-device (Apple Speech), and send it into an agent session
 - Keeps request history (queued / notified / played / interrupted / failed)
-- Optional voice playback (TTS, off by default): cloud providers (ElevenLabs / Google / Deepgram) or on-device local TTS
 - Optional remote WebSocket control API for iOS/phone clients (`ws://<host>:18092/ws`)
 
 ## Use it as an agent hub (from any app)
@@ -55,12 +54,6 @@ Health check:
 
 ```bash
 echo '{"type":"health"}' | nc 127.0.0.1 18091
-```
-
-Stop all speech:
-
-```bash
-echo '{"type":"stop"}' | nc 127.0.0.1 18091
 ```
 
 ## Remote control API (WebSocket)
@@ -96,10 +89,9 @@ Protocol docs:
 
 ## Pi-specific pieces in this repo
 
-- **`Extensions/managerie`** - extracts `<voice>` tags from Pi responses and sends them to Managerie
-- **`Sources/Managerie`** - menu bar app + broker + playback coordinator
-- **`Sources/mnote`** - CLI client for enqueueing/stopping speech
-- **`Sources/ManagerieClient`** - shared client helpers
+- **`Extensions/managerie`** - forwards Pi messages, live status, and inbox replies to Managerie
+- **`Sources/Managerie`** - menu bar app + broker + notification pipeline
+- **`Sources/mnote`** - CLI client for sending notifications
 - **`apps/managerie-ios`** - iPhone companion app scaffold (WebSocket client + session UI)
 
 ## Quick start (dev)
@@ -119,9 +111,7 @@ open .build/Managerie.app
 
 - macOS 13+
 - Accessibility permission for jump-to-session; microphone permission for dictation
-- Only if voice playback (TTS) is enabled: `ffplay` (`brew install ffmpeg`)
-- For cloud TTS mode: ElevenLabs API key (`ELEVEN_API_KEY` / `ELEVENLABS_API_KEY`), Google TTS API key (`GOOGLE_TTS_API_KEY`), or Deepgram API key (`DEEPGRAM_API_KEY` / `DEEPGRAM_TTS_API_KEY`)
-- For local mode: `pocket-tts-cli` runtime plus model files (either bundled in full builds or downloaded on first use from the matching Managerie GitHub release model asset)
+- Dictation uses Apple's on-device speech recognition — no API keys, no network
 
 ## Related projects
 

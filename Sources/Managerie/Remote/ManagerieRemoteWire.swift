@@ -259,7 +259,6 @@ struct ManagerieRemoteSessionSendScreenshotPayload: Codable {
 
 struct ManagerieRemoteTTSSpeakPayload: Codable {
     let text: String
-    let voice: String?
     let sourceApp: String?
     let sessionId: String?
     let pid: Int?
@@ -267,10 +266,6 @@ struct ManagerieRemoteTTSSpeakPayload: Codable {
 
 struct ManagerieRemoteTTSStopPayload: Codable {
     let scope: String?
-}
-
-struct ManagerieRemoteAudioSetStreamPayload: Codable {
-    let enabled: Bool
 }
 
 struct ManagerieRemoteServerHelloPayload: Codable {

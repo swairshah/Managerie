@@ -7,7 +7,6 @@ private final class ManagerieRemotePeer {
     var handshakeBuffer = Data()
     var frameBuffer = Data()
     var authenticated = false
-    var audioStreamEnabled = false
     var awaitingPongCount = 0
     var idempotentAckByKey: [String: ManagerieRemoteFrame] = [:]
     var idempotentAckOrder: [String] = []
@@ -25,7 +24,6 @@ private struct ManagerieRemoteStoredEvent {
 private enum ManagerieRemoteBroadcastScope {
     case allAuthenticated
     case only(ManagerieRemotePeer)
-    case audioSubscribers
 }
 
 final class ManagerieRemoteServer {
@@ -340,9 +338,6 @@ final class ManagerieRemoteServer {
         case "tts.stop":
             handleTTSStop(frame: frame, requestId: requestId, peer: peer)
 
-        case "audio.setStream":
-            handleAudioSetStream(frame: frame, requestId: requestId, peer: peer)
-
         default:
             sendError(name: name, requestId: requestId, code: "UNKNOWN_COMMAND", message: "unknown command: \(name)", to: peer)
         }
@@ -464,7 +459,6 @@ final class ManagerieRemoteServer {
 
         let command = ManagerieRemoteIncomingCommand.speak(
             text: payload.text,
-            voice: payload.voice,
             sourceApp: payload.sourceApp,
             sessionId: payload.sessionId,
             pid: payload.pid,
@@ -491,30 +485,6 @@ final class ManagerieRemoteServer {
             idempotencyKey: idempotencyKey
         )
         handleAsyncCommand(command, name: name, requestId: requestId, idempotencyKey: idempotencyKey, peer: peer)
-    }
-
-    private func handleAudioSetStream(frame: ManagerieRemoteFrame, requestId: String, peer: ManagerieRemotePeer) {
-        let name = "audio.setStream"
-        guard let idempotencyKey = frame.idempotencyKey, !idempotencyKey.isEmpty else {
-            sendError(name: name, requestId: requestId, code: "BAD_REQUEST", message: "idempotencyKey is required", to: peer)
-            return
-        }
-
-        if let previous = peer.idempotentAckByKey[idempotencyKey] {
-            send(frame: previous, to: peer)
-            return
-        }
-
-        guard let payload = frame.payload?.decode(ManagerieRemoteAudioSetStreamPayload.self) else {
-            sendError(name: name, requestId: requestId, code: "BAD_REQUEST", message: "enabled is required", to: peer)
-            return
-        }
-
-        peer.audioStreamEnabled = payload.enabled
-        let ackPayload: JSONValue = .object(["enabled": .bool(payload.enabled)])
-        let ack = ManagerieRemoteFrame.ack(name: name, requestId: requestId, payload: ackPayload)
-        storeIdempotentAck(ack, for: idempotencyKey, peer: peer)
-        send(frame: ack, to: peer)
     }
 
     private func replayEvents(from seq: Int64, to peer: ManagerieRemotePeer) {
@@ -609,56 +579,10 @@ final class ManagerieRemoteServer {
         }
     }
 
-    func publishPlaybackState(_ playback: ManagerieRemotePlaybackState) {
-        let payload = JSONValue.fromEncodable(playback) ?? .object([:])
-        queue.async {
-            self.emitEvent(name: "playback.state", payload: payload)
-        }
-    }
-
     func publishHistoryAppended(_ entry: ManagerieRemoteHistoryEntry) {
         let payload = JSONValue.fromEncodable(entry) ?? .object([:])
         queue.async {
             self.emitEvent(name: "history.appended", payload: payload)
-        }
-    }
-
-    func publishAudioStart(_ event: ManagerieRemoteAudioStart) {
-        let payload = JSONValue.fromEncodable(event) ?? .object([:])
-        queue.async {
-            self.emitEvent(
-                name: "audio.start",
-                payload: payload,
-                scope: .audioSubscribers,
-                includeSequence: false,
-                storeReplay: false
-            )
-        }
-    }
-
-    func publishAudioChunk(_ event: ManagerieRemoteAudioChunk) {
-        let payload = JSONValue.fromEncodable(event) ?? .object([:])
-        queue.async {
-            self.emitEvent(
-                name: "audio.chunk",
-                payload: payload,
-                scope: .audioSubscribers,
-                includeSequence: false,
-                storeReplay: false
-            )
-        }
-    }
-
-    func publishAudioEnd(_ event: ManagerieRemoteAudioEnd) {
-        let payload = JSONValue.fromEncodable(event) ?? .object([:])
-        queue.async {
-            self.emitEvent(
-                name: "audio.end",
-                payload: payload,
-                scope: .audioSubscribers,
-                includeSequence: false,
-                storeReplay: false
-            )
         }
     }
 
@@ -695,11 +619,6 @@ final class ManagerieRemoteServer {
         case .only(let peer):
             guard peer.authenticated else { return }
             send(frame: frame, to: peer)
-
-        case .audioSubscribers:
-            for peer in peers.values where peer.authenticated && peer.audioStreamEnabled {
-                send(frame: frame, to: peer)
-            }
         }
     }
 

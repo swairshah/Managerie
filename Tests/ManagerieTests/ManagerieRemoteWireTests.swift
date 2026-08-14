@@ -37,6 +37,7 @@ final class ManagerieRemoteWireTests: XCTestCase {
     }
 
     func testCommandPayloadDecodeSpeak() {
+        // Older clients still send `voice`; it must decode and be ignored.
         let payload: JSONValue = .object([
             "text": .string("hello from phone"),
             "voice": .string("auto"),
@@ -47,7 +48,6 @@ final class ManagerieRemoteWireTests: XCTestCase {
 
         let decoded = payload.decode(ManagerieRemoteTTSSpeakPayload.self)
         XCTAssertEqual(decoded?.text, "hello from phone")
-        XCTAssertEqual(decoded?.voice, "auto")
         XCTAssertEqual(decoded?.pid, 42)
     }
 

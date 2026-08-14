@@ -69,3 +69,7 @@ dist/
 .vscode/
 *.swp
 *.swo
+
+# Local agent tooling artifacts
+.pi/
+.pi-magazines/

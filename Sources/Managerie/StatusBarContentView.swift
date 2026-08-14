@@ -308,11 +308,6 @@ struct StatusBarContentView: View {
 
             Spacer()
 
-            if monitor.speakingCount > 0 || monitor.totalQueuedItems > 0 {
-                FooterButton(title: "Stop All", systemImage: "stop.fill") {
-                    monitor.stopAll()
-                }
-            }
 
             FooterButton(title: "Window", systemImage: "macwindow") {
                 openSettings()

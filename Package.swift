@@ -13,11 +13,6 @@ let package = Package(
     dependencies: [
     ],
     targets: [
-        // Shared client library
-        .target(
-            name: "ManagerieClient",
-            path: "Sources/ManagerieClient"
-        ),
         // Main menubar app
         .executableTarget(
             name: "Managerie",
@@ -32,7 +27,6 @@ let package = Package(
         // CLI tool
         .executableTarget(
             name: "mnote",
-            dependencies: ["ManagerieClient"],
             path: "Sources/mnote"
         ),
         .testTarget(

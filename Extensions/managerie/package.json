@@ -1,7 +1,7 @@
 {
   "name": "@swairshah/managerie",
-  "version": "1.0.0",
-  "description": "Managerie connector extension for the pi coding agent — notifications, live session status, and reply injection for the Managerie menubar app",
+  "version": "2.0.0",
+  "description": "Managerie connector extension for the pi coding agent \u2014 notifications, live session status, and reply injection for the Managerie menubar app",
   "main": "index.ts",
   "type": "module",
   "keywords": [

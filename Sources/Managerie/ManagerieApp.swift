@@ -46,13 +46,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     static var shared: AppDelegate?
 
     // Menu bar UI is handled by SwiftUI MenuBarExtra
-    // TTS can run via cloud providers or optional local on-device runtime
     var settingsWindow: NSWindow?
-    var speechCoordinator: SpeechPlaybackCoordinator?
     var localBroker: LocalSpeechBroker?
     var legacyBroker: LocalSpeechBroker?
     private var legacyBrokerRetryTimer: Timer?
-    var micMonitor: MicrophoneActivityMonitor?
     let brokerPort = 18091
     let legacyBrokerPort = 18081  // old PiTalk port (compat)
 
@@ -70,23 +67,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    var selectedVoice: String {
-        UserDefaults.standard.string(forKey: "ttsVoice") ?? "ally"
-    }
-
     // Server enabled state - persisted (inverted storage as "serverDisabled")
     var serverEnabled: Bool {
         get { !UserDefaults.standard.bool(forKey: "serverDisabled") }
-        set {
-            UserDefaults.standard.set(!newValue, forKey: "serverDisabled")
-            speechCoordinator?.isMuted = !newValue
-        }
-    }
-
-    // Voice playback master switch — Managerie is notification-first; TTS is opt-in (default off).
-    var ttsEnabled: Bool {
-        get { UserDefaults.standard.bool(forKey: "ttsEnabled") }
-        set { UserDefaults.standard.set(newValue, forKey: "ttsEnabled") }
+        set { UserDefaults.standard.set(!newValue, forKey: "serverDisabled") }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -103,55 +87,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             IntegrationsManager.shared.autoInstallIfNeeded()
         }
 
-        switch ElevenLabsApiKeyManager.bootstrapPersistedKeyIfNeeded() {
-        case .importedFromEnvironment:
-            debugLog("Managerie: Imported ElevenLabs API key from process environment")
-        case .importedFromDotEnv:
-            debugLog("Managerie: Imported ElevenLabs API key from ~/.env")
-        case .alreadyConfigured, .notFound:
-            break
-        }
-
-        switch GoogleApiKeyManager.bootstrapPersistedKeyIfNeeded() {
-        case .importedFromEnvironment:
-            debugLog("Managerie: Imported Google TTS API key from process environment")
-        case .importedFromDotEnv:
-            debugLog("Managerie: Imported Google TTS API key from ~/.env")
-        case .alreadyConfigured, .notFound:
-            break
-        }
-
-        switch DeepgramApiKeyManager.bootstrapPersistedKeyIfNeeded() {
-        case .importedFromEnvironment:
-            debugLog("Managerie: Imported Deepgram TTS API key from process environment")
-        case .importedFromDotEnv:
-            debugLog("Managerie: Imported Deepgram TTS API key from ~/.env")
-        case .alreadyConfigured, .notFound:
-            break
-        }
-
         // Menu bar is now handled by SwiftUI MenuBarExtra
         setupKeyboardShortcuts()
         updateDockIconVisibility()
 
         // Notification-first: register categories + request authorization.
         AgentNotificationManager.shared.setup()
-
-        speechCoordinator = SpeechPlaybackCoordinator(
-            defaultVoiceProvider: { [weak self] in self?.selectedVoice ?? "ally" }
-        )
-
-        // Restore server enabled state from preferences
-        speechCoordinator?.isMuted = !serverEnabled
-
-        micMonitor = MicrophoneActivityMonitor { [weak self] isActive in
-            debugLog("Managerie: Mic callback triggered, isActive=\(isActive)")
-            self?.speechCoordinator?.setMicrophoneActive(isActive)
-            // Notify VoiceMonitor of mic state change
-            NotificationCenter.default.post(name: .micActivityChanged, object: nil, userInfo: ["isActive": isActive])
-        }
-        micMonitor?.start()
-        debugLog("Managerie: Mic monitor started")
 
         // Only start broker if server is enabled
         if serverEnabled {
@@ -218,11 +159,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         remoteRuntime?.stop()
-        micMonitor?.stop()
         eventSpool?.stop()
         localBroker?.stop()
-        LocalTTSRuntime.shared.stopServer()
-        speechCoordinator?.stopAll()
         KeyboardShortcutManager.shared.unregisterAll()
     }
 
@@ -232,10 +170,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let manager = KeyboardShortcutManager.shared
 
         // Wire up action handlers
-        manager.setHandler(for: .stopSpeech) { [weak self] in
-            self?.stopCurrentSpeech()
-        }
-
         manager.setHandler(for: .toggleWindow) {
             Self.toggleMenuBarWindow()
         }
@@ -262,16 +196,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var eventSpool: EventSpoolWatcher?
 
     func startLocalBroker() {
-        debugLog("Managerie: startLocalBroker called, coordinator=\(speechCoordinator != nil), localBroker=\(localBroker != nil)")
-        guard let coordinator = speechCoordinator else {
-            debugLog("Managerie: No coordinator, cannot start broker")
-            return
-        }
+        debugLog("Managerie: startLocalBroker called, localBroker=\(localBroker != nil)")
 
         // Primary transport: the file event spool. No ports involved — this
         // works even if every TCP port below is taken by another process.
         if eventSpool == nil {
-            let processor = BrokerRequestProcessor(coordinator: coordinator)
+            let processor = BrokerRequestProcessor()
             let spool = EventSpoolWatcher { line in
                 _ = processor.process(line)
             }
@@ -287,7 +217,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         do {
-            let broker = try LocalSpeechBroker(port: brokerPort, coordinator: coordinator)
+            let broker = try LocalSpeechBroker(port: brokerPort)
             broker.start()
             localBroker = broker
             debugLog("Managerie: Local broker listening on 127.0.0.1:\(brokerPort)")
@@ -296,7 +226,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        // Also start HTTP health server on 18090 (pi-tts extension expects this)
+        // Also start HTTP health server on 18090
         if healthServer == nil {
             do {
                 let server = try HealthHTTPServer(port: 18090)
@@ -322,9 +252,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startLegacyBrokerIfAvailable() {
-        guard legacyBroker == nil, let coordinator = speechCoordinator else { return }
+        guard legacyBroker == nil else { return }
         do {
-            let broker = try LocalSpeechBroker(port: legacyBrokerPort, coordinator: coordinator)
+            let broker = try LocalSpeechBroker(port: legacyBrokerPort)
             broker.start()
             legacyBroker = broker
             debugLog("Managerie: Legacy broker listening on 127.0.0.1:\(legacyBrokerPort) (pi-talk compat)")
@@ -344,11 +274,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         healthServer?.stop()
         healthServer = nil
         debugLog("Managerie: Broker and health server stopped")
-    }
-
-    @objc func stopCurrentSpeech() {
-        // Centralized stop: clear broker queue, stop active Managerie playback, stop current synth request.
-        speechCoordinator?.stopAll()
     }
 
     @objc func toggleDockIcon() {
@@ -403,18 +328,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
 // MARK: - Local Broker & Playback
 
-private struct SpeechJob {
-    let historyEntryId: UUID
-    let text: String
-    let voice: String
-    let sourceApp: String?
-    let sessionId: String?
-    let pid: Int?
-}
-
 struct BrokerRequest: Decodable {
     let type: String
     let text: String?
+    /// Older clients still send this; decoded so their payloads don't fail, then ignored.
     let voice: String?
     let sourceApp: String?
     let sessionId: String?
@@ -456,40 +373,45 @@ struct BrokerResponse: Encodable {
     }
 }
 
+/// Delivery state of an agent message. Playback-era cases (`playing`,
+/// `played`, `interrupted`) are kept decodable so existing history files
+/// still load, but nothing produces them any more.
 enum RequestPlaybackStatus: String, Codable {
     case queued
-    case playing
-    case played
     case notified
-    case interrupted
     case cancelled
     case failed
+
+    // Legacy, decode-only.
+    case playing
+    case played
+    case interrupted
 
     var displayName: String {
         switch self {
         case .queued: return "Queued"
-        case .playing: return "Playing"
-        case .played: return "Played"
         case .notified: return "Notified"
-        case .interrupted: return "Interrupted"
         case .cancelled: return "Cancelled"
         case .failed: return "Failed"
+        case .playing: return "Playing"
+        case .played: return "Delivered"
+        case .interrupted: return "Interrupted"
         }
     }
 
     var isInQueue: Bool {
-        self == .queued || self == .playing
+        self == .queued
     }
 
     var tintColor: Color {
         switch self {
         case .queued: return .secondary
-        case .playing: return .blue
-        case .played: return .green
         case .notified: return .green
-        case .interrupted: return .orange
         case .cancelled: return .orange
         case .failed: return .red
+        case .playing: return .blue
+        case .played: return .green
+        case .interrupted: return .orange
         }
     }
 }
@@ -498,7 +420,6 @@ struct RequestHistoryEntry: Identifiable, Codable {
     let id: UUID
     let timestamp: Date
     let text: String
-    let voice: String?
     let sourceApp: String?
     let sessionId: String?
     let pid: Int?
@@ -506,9 +427,8 @@ struct RequestHistoryEntry: Identifiable, Codable {
 
     init(
         id: UUID = UUID(),
-        timestamp: Date,
+        timestamp: Date = Date(),
         text: String,
-        voice: String?,
         sourceApp: String?,
         sessionId: String?,
         pid: Int?,
@@ -517,7 +437,6 @@ struct RequestHistoryEntry: Identifiable, Codable {
         self.id = id
         self.timestamp = timestamp
         self.text = text
-        self.voice = voice
         self.sourceApp = sourceApp
         self.sessionId = sessionId
         self.pid = pid
@@ -525,7 +444,7 @@ struct RequestHistoryEntry: Identifiable, Codable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, timestamp, text, voice, sourceApp, sessionId, pid, status
+        case id, timestamp, text, sourceApp, sessionId, pid, status
     }
 
     init(from decoder: Decoder) throws {
@@ -533,12 +452,11 @@ struct RequestHistoryEntry: Identifiable, Codable {
         id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         timestamp = try container.decode(Date.self, forKey: .timestamp)
         text = try container.decode(String.self, forKey: .text)
-        voice = try container.decodeIfPresent(String.self, forKey: .voice)
         sourceApp = try container.decodeIfPresent(String.self, forKey: .sourceApp)
         sessionId = try container.decodeIfPresent(String.self, forKey: .sessionId)
         pid = try container.decodeIfPresent(Int.self, forKey: .pid)
-        // Backward compatibility: old entries had no status, treat as already played
-        status = try container.decodeIfPresent(RequestPlaybackStatus.self, forKey: .status) ?? .played
+        // Entries written before delivery statuses existed.
+        status = try container.decodeIfPresent(RequestPlaybackStatus.self, forKey: .status) ?? .notified
     }
 }
 
@@ -584,15 +502,14 @@ final class RequestHistoryStore: ObservableObject {
     }
 
     @discardableResult
-    func add(text: String, voice: String?, sourceApp: String?, sessionId: String?, pid: Int?) -> UUID {
+    func add(text: String, sourceApp: String?, sessionId: String?, pid: Int?, status: RequestPlaybackStatus = .notified) -> UUID {
         let entry = RequestHistoryEntry(
             timestamp: Date(),
             text: text,
-            voice: voice,
             sourceApp: sourceApp,
             sessionId: sessionId,
             pid: pid,
-            status: .queued
+            status: status
         )
 
         let snapshot = storageQueue.sync { () -> [RequestHistoryEntry] in
@@ -725,1777 +642,35 @@ final class RequestHistoryStore: ObservableObject {
     }
 }
 
-final class MicrophoneActivityMonitor {
-    private let pollQueue = DispatchQueue(label: "loqui.mic.monitor")
-    private var timer: DispatchSourceTimer?
 
-    private let pollInterval: TimeInterval
-    private let releaseDelay: TimeInterval
-    private let onActivityChanged: (Bool) -> Void
 
-    private var isActive = false
-    private var keepActiveUntil = Date.distantPast
-
-    init(
-        pollInterval: TimeInterval = 0.25,
-        releaseDelay: TimeInterval = 0.8,
-        onActivityChanged: @escaping (Bool) -> Void
-    ) {
-        self.pollInterval = pollInterval
-        self.releaseDelay = releaseDelay
-        self.onActivityChanged = onActivityChanged
-    }
-
-    func start() {
-        guard timer == nil else { return }
-
-        let timer = DispatchSource.makeTimerSource(queue: pollQueue)
-        timer.schedule(deadline: .now(), repeating: pollInterval)
-        timer.setEventHandler { [weak self] in
-            self?.pollMicrophoneUsage()
-        }
-        timer.resume()
-        self.timer = timer
-    }
-
-    func stop() {
-        timer?.cancel()
-        timer = nil
-        setActive(false)
-    }
-
-    private func pollMicrophoneUsage() {
-        // Detect whether the default input device is currently running.
-        // This does not open the microphone from Managerie itself.
-        let inUse = isDefaultInputDeviceRunning()
-        let now = Date()
-
-        if inUse {
-            keepActiveUntil = now.addingTimeInterval(releaseDelay)
-            if !isActive {
-                setActive(true)
-            }
-        } else if isActive, now >= keepActiveUntil {
-            setActive(false)
-        }
-    }
-
-    private func isDefaultInputDeviceRunning() -> Bool {
-        var defaultInputAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultInputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
-        var deviceID = AudioDeviceID(0)
-        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-
-        let getDeviceStatus = AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &defaultInputAddress,
-            0,
-            nil,
-            &size,
-            &deviceID
-        )
-
-        guard getDeviceStatus == noErr, deviceID != AudioDeviceID(kAudioObjectUnknown) else {
-            return false
-        }
-
-        var runningAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
-        var running: UInt32 = 0
-        size = UInt32(MemoryLayout<UInt32>.size)
-
-        let getRunningStatus = AudioObjectGetPropertyData(
-            deviceID,
-            &runningAddress,
-            0,
-            nil,
-            &size,
-            &running
-        )
-
-        guard getRunningStatus == noErr else {
-            return false
-        }
-
-        return running != 0
-    }
-
-    private func setActive(_ active: Bool) {
-        guard active != isActive else { return }
-        isActive = active
-
-        if ProcessInfo.processInfo.environment["MANAGERIE_DEBUG"] == "1" {
-            print("Managerie: Microphone activity changed: \(active ? "ACTIVE" : "INACTIVE")")
-        }
-
-        DispatchQueue.main.async {
-            self.onActivityChanged(active)
-        }
-    }
-}
-
-
-final class SpeechPlaybackCoordinator {
-    private let queue = DispatchQueue(label: "managerie.playback.coordinator")
-
-    // Per-source queue buckets keyed by app + session
-    private var queuesByKey: [String: [SpeechJob]] = [:]
-    private var queueOrder: [String] = []
-
-    private var isPlaying = false
-    private var currentProcess: Process?
-    private var currentAudioPlayer: AVAudioPlayer?
-    private var currentJobHistoryId: UUID?
-    private var currentQueueKey: String?
-    private var currentRunNonce: UUID?
-    private var ffplayRawMonoArgsByPath: [String: [String]] = [:]
-
-    private var isMicrophoneActive = false
-
-    // Mute toggle - when true, requests are tracked but not spoken
-    private var _isMuted = false
-    var isMuted: Bool {
-        get { queue.sync { _isMuted } }
-        set {
-            queue.async {
-                let wasMuted = self._isMuted
-                self._isMuted = newValue
-                // If unmuting, resume queue processing
-                if wasMuted && !newValue {
-                    self.startNextIfNeededLocked()
-                }
-            }
-        }
-    }
-
-    // Auto voice assignment for queues that don't specify voice.
-    // Uses the voice pool for the current TTS provider
-    private var autoVoicePool: [String] {
-        switch SpeechPlaybackCoordinator.currentProvider {
-        case .elevenlabs:
-            return SpeechPlaybackCoordinator.elevenLabsVoicePool
-        case .google:
-            return SpeechPlaybackCoordinator.googleVoicePool
-        case .deepgram:
-            return SpeechPlaybackCoordinator.deepgramVoicePool
-        case .local:
-            return SpeechPlaybackCoordinator.localVoicePool
-        }
-    }
-    private var autoVoiceByQueueKey: [String: String] = [:]
-    private var autoVoiceCycleIndex = 0
-
-    private let defaultVoiceProvider: () -> String
-
-    // Remote audio mirror callback (e.g. iOS companion stream).
-    private let audioMirrorHandlerLock = NSLock()
-    private var audioMirrorHandler: ((ManagerieRemoteAudioMirrorEvent) -> Void)?
-
-    init(defaultVoiceProvider: @escaping () -> String) {
-        self.defaultVoiceProvider = defaultVoiceProvider
-    }
-
-    func setAudioMirrorHandler(_ handler: ((ManagerieRemoteAudioMirrorEvent) -> Void)?) {
-        audioMirrorHandlerLock.lock()
-        audioMirrorHandler = handler
-        audioMirrorHandlerLock.unlock()
-    }
-
-    func enqueue(text: String,
-                 voice: String?,
-                 sourceApp: String?,
-                 sessionId: String?,
-                 pid: Int?) -> Int {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            return state().pending
-        }
-
-        let key = queueKey(sourceApp: sourceApp, sessionId: sessionId)
-
-        return queue.sync {
-            let resolvedVoice = resolveVoiceForQueueLocked(requestedVoice: voice, queueKey: key)
-
-            let historyEntryId = RequestHistoryStore.shared.add(
-                text: trimmed,
-                voice: resolvedVoice,
-                sourceApp: sourceApp,
-                sessionId: sessionId,
-                pid: pid
-            )
-
-            // Notification-first: surface every agent message as a user notification.
-            AgentNotificationManager.shared.postAgentMessage(
-                text: trimmed,
-                sourceApp: sourceApp,
-                sessionId: sessionId,
-                pid: pid
-            )
-
-            // Voice playback is opt-in — without it Managerie just records + notifies.
-            guard UserDefaults.standard.bool(forKey: "ttsEnabled") else {
-                RequestHistoryStore.shared.updateStatus(id: historyEntryId, to: .notified)
-                return pendingCountLocked() + (isPlaying ? 1 : 0)
-            }
-
-            // Post-processing rules only shape spoken text, never notifications.
-            let processed = PostProcessingRuleStore.shared
-                .apply(to: trimmed)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !processed.isEmpty else {
-                RequestHistoryStore.shared.updateStatus(id: historyEntryId, to: .notified)
-                return pendingCountLocked() + (isPlaying ? 1 : 0)
-            }
-
-            let job = SpeechJob(
-                historyEntryId: historyEntryId,
-                text: processed,
-                voice: resolvedVoice,
-                sourceApp: sourceApp,
-                sessionId: sessionId,
-                pid: pid
-            )
-
-            if queuesByKey[key] == nil {
-                queuesByKey[key] = []
-                queueOrder.append(key)
-            }
-            queuesByKey[key]?.append(job)
-
-            startNextIfNeededLocked()
-            return pendingCountLocked() + (isPlaying ? 1 : 0)
-        }
-    }
-
-    func state() -> (pending: Int, playing: Bool, currentQueue: String?) {
-        queue.sync {
-            (pendingCountLocked() + (isPlaying ? 1 : 0), isPlaying, currentQueueKey)
-        }
-    }
-
-    func clearVoiceAssignments() {
-        queue.sync {
-            autoVoiceByQueueKey.removeAll()
-            autoVoiceCycleIndex = 0
-        }
-    }
-
-    #if DEBUG
-    func assignAutoVoiceForQueueForTesting(sourceApp: String?, sessionId: String?) -> String {
-        let key = queueKey(sourceApp: sourceApp, sessionId: sessionId)
-        return queue.sync {
-            resolveVoiceForQueueLocked(requestedVoice: nil, queueKey: key)
-        }
-    }
-    #endif
-
-    func stopAll() {
-        debugLog("Managerie: stopAll() called")
-        let state = queue.sync { () -> (pending: [UUID], active: UUID?) in
-            let pendingIds = allPendingHistoryIdsLocked()
-            let activeId = currentJobHistoryId
-
-            debugLog("Managerie: stopAll - pending=\(pendingIds.count), hasActive=\(activeId != nil), currentProcess=\(currentProcess != nil)")
-
-            queuesByKey.removeAll()
-            queueOrder.removeAll()
-            // Keep voice assignments so continued sessions retain their prior auto-voice.
-            terminateCurrentProcessLocked()
-            currentJobHistoryId = nil
-            currentQueueKey = nil
-            currentRunNonce = nil
-            isPlaying = false
-
-            return (pending: pendingIds, active: activeId)
-        }
-
-        for id in state.pending {
-            RequestHistoryStore.shared.updateStatus(id: id, to: .cancelled)
-        }
-
-        if let activeId = state.active {
-            RequestHistoryStore.shared.updateStatus(id: activeId, to: .interrupted)
-        }
-    }
-
-    /// Selective stop: cancel only jobs matching the given sourceApp (and optionally sessionId).
-    /// If sourceApp is nil, falls back to stopAll().
-    /// If sessionId is also provided, only the specific queue key is cleared.
-    /// If only sourceApp is provided, all queues for that app are cleared.
-    func stopForSource(sourceApp: String?, sessionId: String?) {
-        guard let sourceApp = sourceApp,
-              !sourceApp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            stopAll()
-            return
-        }
-
-        let normalizedApp = normalizedSourceApp(sourceApp)
-
-        let state = queue.sync { () -> (cancelled: [UUID], interrupted: UUID?, shouldResumeNext: Bool) in
-            var cancelledIds: [UUID] = []
-            var interruptedId: UUID? = nil
-            var shouldResumeNext = false
-
-            // Determine which keys to remove
-            let keysToRemove: [String]
-            if let sessionId = sessionId,
-               !sessionId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                // Specific queue key
-                let key = queueKey(sourceApp: sourceApp, sessionId: sessionId)
-                keysToRemove = [key]
-            } else {
-                // All queues for this sourceApp
-                let prefix = "\(normalizedApp)::"
-                keysToRemove = queuesByKey.keys.filter { $0.hasPrefix(prefix) }
-            }
-
-            // Collect pending job IDs from targeted queues
-            for key in keysToRemove {
-                if let jobs = queuesByKey[key] {
-                    cancelledIds.append(contentsOf: jobs.map(\.historyEntryId))
-                }
-                queuesByKey.removeValue(forKey: key)
-                queueOrder.removeAll { $0 == key }
-            }
-
-            // If the currently playing job belongs to a targeted queue, stop it
-            if let activeKey = currentQueueKey, keysToRemove.contains(activeKey) {
-                interruptedId = currentJobHistoryId
-                terminateCurrentProcessLocked()
-                currentJobHistoryId = nil
-                currentQueueKey = nil
-                currentRunNonce = nil
-                isPlaying = false
-                shouldResumeNext = true
-            }
-
-            debugLog("Managerie: stopForSource(sourceApp: \(sourceApp), sessionId: \(sessionId ?? "nil")) - cancelled=\(cancelledIds.count), interrupted=\(interruptedId != nil), keysRemoved=\(keysToRemove)")
-
-            return (cancelled: cancelledIds, interrupted: interruptedId, shouldResumeNext: shouldResumeNext)
-        }
-
-        for id in state.cancelled {
-            RequestHistoryStore.shared.updateStatus(id: id, to: .cancelled)
-        }
-
-        if let interruptedId = state.interrupted {
-            RequestHistoryStore.shared.updateStatus(id: interruptedId, to: .interrupted)
-        }
-
-        // If we interrupted the active job, kick the scheduler to play the next one
-        if state.shouldResumeNext {
-            queue.async {
-                self.startNextIfNeededLocked()
-            }
-        }
-    }
-
-    func setMicrophoneActive(_ active: Bool) {
-        queue.async {
-            self.handleMicrophoneStateChangeLocked(active)
-        }
-    }
-
-    private func handleMicrophoneStateChangeLocked(_ active: Bool) {
-        guard active != isMicrophoneActive else { return }
-        isMicrophoneActive = active
-
-        let hasProcess = currentProcess != nil
-        let isRunning = currentProcess?.isRunning == true
-        debugLog("Managerie: Coordinator mic state: \(active ? "ACTIVE" : "INACTIVE"), hasProcess=\(hasProcess), isRunning=\(isRunning), isPlaying=\(isPlaying)")
-
-        if active {
-            // Check if we're actively playing OR in the middle of synthesizing (isPlaying but process not yet started)
-            let activelyPlaying = currentProcess?.isRunning == true
-            let synthesizing = isPlaying && currentProcess == nil
-
-            // Requirement: if mic starts while voice is playing/synthesizing, cancel all queued work at that moment.
-            guard activelyPlaying || synthesizing else {
-                debugLog("Managerie: Mic active but no playback/synthesis running, skipping stop")
-                return
-            }
-            debugLog("Managerie: Mic active, stopping playback! (activelyPlaying=\(activelyPlaying), synthesizing=\(synthesizing))")
-
-            let activeId = currentJobHistoryId
-            let interruptedQueueKey = currentQueueKey
-
-            // Only cancel messages from the currently playing app/session, pause others
-            var cancelledIds: [UUID] = []
-            if let key = interruptedQueueKey {
-                // Get pending IDs from the interrupted queue only
-                cancelledIds = queuesByKey[key]?.map(\.historyEntryId) ?? []
-                // Remove only this queue
-                queuesByKey.removeValue(forKey: key)
-                queueOrder.removeAll { $0 == key }
-                debugLog("Managerie: Cancelled queue '\(key)' with \(cancelledIds.count) pending, \(queuesByKey.count) other queues paused")
-            }
-
-            // Keep voice assignments so this queue key keeps the same voice after interruption.
-            terminateCurrentProcessLocked()
-            currentJobHistoryId = nil
-            currentQueueKey = nil
-            currentRunNonce = nil
-            isPlaying = false
-
-            for id in cancelledIds {
-                RequestHistoryStore.shared.updateStatus(id: id, to: .cancelled)
-            }
-            if let activeId {
-                RequestHistoryStore.shared.updateStatus(id: activeId, to: .interrupted)
-            }
-        } else {
-            // Mic inactive again, resume queued playback.
-            startNextIfNeededLocked()
-        }
-    }
-
-    private func startNextIfNeededLocked() {
-        guard !isPlaying, !isMicrophoneActive, !_isMuted else { return }
-        guard let (queueKey, job) = dequeueNextJobLocked() else { return }
-
-        isPlaying = true
-        currentJobHistoryId = job.historyEntryId
-        currentQueueKey = queueKey
-
-        let runNonce = UUID()
-        currentRunNonce = runNonce
-
-        RequestHistoryStore.shared.updateStatus(
-            id: job.historyEntryId,
-            to: .playing,
-            unlessCurrentIn: [.cancelled, .interrupted]
-        )
-
-        Task { [weak self] in
-            await self?.process(job: job, runNonce: runNonce)
-        }
-    }
-
-    private func process(job: SpeechJob, runNonce: UUID) async {
-        var finalStatus: RequestPlaybackStatus = .played
-
-        // If muted, skip playback but mark as played
-        if isMuted {
-            RequestHistoryStore.shared.updateStatus(
-                id: job.historyEntryId,
-                to: .played,
-                unlessCurrentIn: [.cancelled, .interrupted]
-            )
-            finishCurrent(runNonce: runNonce)
-            return
-        }
-
-        do {
-            guard await waitUntilMicrophoneInactive(runNonce: runNonce) else {
-                // Interrupted by mic activity
-                finalStatus = .interrupted
-                RequestHistoryStore.shared.updateStatus(id: job.historyEntryId, to: finalStatus)
-                finishCurrent(runNonce: runNonce)
-                return
-            }
-            guard shouldContinue(runNonce: runNonce) else {
-                // Cancelled
-                finalStatus = .cancelled
-                RequestHistoryStore.shared.updateStatus(id: job.historyEntryId, to: finalStatus)
-                finishCurrent(runNonce: runNonce)
-                return
-            }
-
-            // Use streaming API for lower latency
-            try await synthesizeAndPlayStreaming(job: job, runNonce: runNonce)
-        } catch {
-            finalStatus = .failed
-            print("Managerie: Playback error: \(error.localizedDescription)")
-        }
-
-        RequestHistoryStore.shared.updateStatus(
-            id: job.historyEntryId,
-            to: finalStatus,
-            unlessCurrentIn: [.cancelled, .interrupted]
-        )
-
-        finishCurrent(runNonce: runNonce)
-    }
-
-    private func finishCurrent(runNonce: UUID) {
-        queue.async {
-            guard self.currentRunNonce == runNonce else { return }
-
-            self.currentProcess = nil
-            self.currentAudioPlayer = nil
-            self.currentJobHistoryId = nil
-            self.currentQueueKey = nil
-            self.currentRunNonce = nil
-            self.isPlaying = false
-            self.startNextIfNeededLocked()
-        }
-    }
-
-    private func shouldContinue(runNonce: UUID) -> Bool {
-        queue.sync {
-            currentRunNonce == runNonce
-        }
-    }
-
-    private func waitUntilMicrophoneInactive(runNonce: UUID) async -> Bool {
-        while true {
-            let snapshot = queue.sync { (isMicrophoneActive, currentRunNonce == runNonce) }
-            let micActive = snapshot.0
-            let runStillValid = snapshot.1
-
-            if !runStillValid {
-                return false
-            }
-            if !micActive {
-                return true
-            }
-
-            try? await Task.sleep(nanoseconds: 150_000_000)
-        }
-    }
-
-    // TTS Provider selection
-    enum TTSProvider: String, CaseIterable {
-        case elevenlabs = "elevenlabs"
-        case google = "google"
-        case deepgram = "deepgram"
-        case local = "local"
-
-        var displayName: String {
-            switch self {
-            case .elevenlabs: return "ElevenLabs"
-            case .google: return "Google Cloud"
-            case .deepgram: return "Deepgram"
-            case .local: return "Local"
-            }
-        }
-    }
-
-    static var currentProvider: TTSProvider {
-        TTSProvider(rawValue: UserDefaults.standard.string(forKey: "ttsProvider") ?? "elevenlabs") ?? .elevenlabs
-    }
-
-    // ElevenLabs voice ID mapping - British & Scottish voices only
-    private static let elevenLabsVoices: [String: String] = [
-        // Preferred voices (first in pool)
-        "ally": "v2zbX16tJNtRIx8rSHDM",        // Ally - Scottish Glaswegian, relaxed male
-        "dorothy": "ThT5KcBeYPX3keUQqHPh",     // Dorothy - British, pleasant young female
-        "lily": "pFZP5JQG7iQjIQuC4Bku",        // Lily - British, middle-aged raspy female
-
-        // Other British voices
-        "alice": "Xb7hH8MSUJpSbSDYk0k2",       // Alice - British, confident female, news style
-        "dave": "CYw3kZ02Hs0563khs1Fj",        // Dave - British Essex, conversational male
-        "joseph": "Zlb1dXrM653N07WRdFW3",      // Joseph - British, middle-aged news reporter
-    ]
-
-    // Google Cloud TTS voices - British & Australian
-    // Format: display name -> (voice name, language code)
-    private static let googleVoices: [String: (voiceName: String, languageCode: String)] = [
-        // British - Studio (highest quality)
-        "george": ("en-GB-Studio-B", "en-GB"),      // British male, studio quality
-        "emma": ("en-GB-Studio-C", "en-GB"),        // British female, studio quality
-
-        // British - Neural2 (high quality)
-        "oliver": ("en-GB-Neural2-B", "en-GB"),     // British male
-        "sophia": ("en-GB-Neural2-A", "en-GB"),     // British female
-        "charlotte": ("en-GB-Neural2-C", "en-GB"),  // British female
-        "william": ("en-GB-Neural2-D", "en-GB"),    // British male
-
-        // Australian - Neural2
-        "jack": ("en-AU-Neural2-B", "en-AU"),       // Australian male
-        "olivia": ("en-AU-Neural2-A", "en-AU"),     // Australian female
-        "isla": ("en-AU-Neural2-C", "en-AU"),       // Australian female
-        "liam": ("en-AU-Neural2-D", "en-AU"),       // Australian male
-    ]
-
-    // Deepgram TTS voices - British, Australian, and Irish accents only
-    // Format: display name -> model ID
-    private static let deepgramVoices: [String: String] = [
-        // British
-        "draco": "aura-2-draco-en",
-        "pandora": "aura-2-pandora-en",
-
-        // Australian
-        "hyperion": "aura-2-hyperion-en",
-        "theia": "aura-2-theia-en",
-
-        // Irish
-        "angus": "aura-angus-en",
-    ]
-
-    static let googleVoicePool = ["george", "emma", "oliver", "sophia", "jack", "olivia"]
-    static let elevenLabsVoicePool = ["ally", "dorothy", "lily", "alice", "dave", "joseph"]
-    static let deepgramVoicePool = ["draco", "pandora", "hyperion", "theia", "angus"]
-    static let localVoicePool = [
-        "vera", "paul", "charles", "michael", "anna", "fantine", "eponine",
-        "cosette", "eve", "george", "mary"
-    ]
-
-    private func synthesize(job: SpeechJob) async throws -> Data {
-        switch Self.currentProvider {
-        case .elevenlabs:
-            return try await synthesizeWithElevenLabs(job: job)
-        case .google:
-            return try await synthesizeWithGoogle(job: job)
-        case .deepgram:
-            return try await synthesizeWithDeepgram(job: job)
-        case .local:
-            return try await synthesizeWithLocal(job: job)
-        }
-    }
-
-    private func configuredSpeechSpeed() -> Double {
-        let raw = UserDefaults.standard.object(forKey: "speechSpeed") as? Double ?? 1.0
-        let rounded = (raw * 100).rounded() / 100
-        return min(2.0, max(0.7, rounded))
-    }
-
-    private func elevenLabsConfiguredSpeechSpeed() -> Double {
-        // ElevenLabs starts failing on higher values, so cap at 1.2.
-        let clamped = min(1.2, configuredSpeechSpeed())
-        return (clamped * 100).rounded() / 100
-    }
-
-    private func localPlaybackTempoFilter() -> String? {
-        let speed = configuredSpeechSpeed()
-        guard abs(speed - 1.0) > 0.01 else { return nil }
-        return String(format: "atempo=%.2f", speed)
-    }
-
-    private func synthesizeWithElevenLabs(job: SpeechJob) async throws -> Data {
-        // Get API key from environment, app settings, or ~/.env
-        guard let apiKey = ElevenLabsApiKeyManager.resolvedKey(), !apiKey.isEmpty else {
-            throw NSError(domain: "Managerie", code: 401, userInfo: [
-                NSLocalizedDescriptionKey: "ElevenLabs API key not found. Add it in settings or import it from ~/.env."
-            ])
-        }
-
-        // Map voice name to ElevenLabs voice ID (default to "ally")
-        let voiceId = Self.elevenLabsVoices[job.voice.lowercased()] ?? Self.elevenLabsVoices["ally"] ?? "v2zbX16tJNtRIx8rSHDM"
-
-        let url = URL(string: "https://api.elevenlabs.io/v1/text-to-speech/\(voiceId)")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 30
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
-        request.setValue("audio/mpeg", forHTTPHeaderField: "Accept")
-
-        var voiceSettings: [String: Any] = [
-            "stability": 0.5,
-            "similarity_boost": 0.75
-        ]
-        let speed = elevenLabsConfiguredSpeechSpeed()
-        if abs(speed - 1.0) > 0.01 {
-            voiceSettings["speed"] = speed
-        }
-
-        let body: [String: Any] = [
-            "text": job.text,
-            "model_id": "eleven_monolingual_v1",
-            "voice_settings": voiceSettings
-        ]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw NSError(domain: "Managerie", code: 500, userInfo: [NSLocalizedDescriptionKey: "Invalid response"])
-        }
-
-        guard httpResponse.statusCode == 200 else {
-            let errorMessage = String(data: data, encoding: .utf8) ?? "Unknown error"
-            throw NSError(domain: "Managerie", code: httpResponse.statusCode, userInfo: [
-                NSLocalizedDescriptionKey: "ElevenLabs API error (\(httpResponse.statusCode)): \(errorMessage)"
-            ])
-        }
-
-        return data
-    }
-
-    private func synthesizeWithGoogle(job: SpeechJob) async throws -> Data {
-        guard let apiKey = GoogleApiKeyManager.resolvedKey(), !apiKey.isEmpty else {
-            throw NSError(domain: "Managerie", code: 401, userInfo: [
-                NSLocalizedDescriptionKey: "Google Cloud API key not found. Add it in settings or import it from ~/.env."
-            ])
-        }
-
-        // Map voice name to Google voice (default to "george")
-        let voiceConfig = Self.googleVoices[job.voice.lowercased()] ?? Self.googleVoices["george"] ?? ("en-GB-Studio-B", "en-GB")
-
-        let url = URL(string: "https://texttospeech.googleapis.com/v1/text:synthesize?key=\(apiKey)")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 30
-        request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
-
-        // Google can use the full slider range.
-        let speed = configuredSpeechSpeed()
-
-        let body: [String: Any] = [
-            "input": ["text": job.text],
-            "voice": [
-                "languageCode": voiceConfig.languageCode,
-                "name": voiceConfig.voiceName
-            ],
-            "audioConfig": [
-                "audioEncoding": "MP3",
-                "speakingRate": speed,
-                "pitch": 0
-            ]
-        ]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw NSError(domain: "Managerie", code: 500, userInfo: [NSLocalizedDescriptionKey: "Invalid response"])
-        }
-
-        guard httpResponse.statusCode == 200 else {
-            let errorMessage = String(data: data, encoding: .utf8) ?? "Unknown error"
-            throw NSError(domain: "Managerie", code: httpResponse.statusCode, userInfo: [
-                NSLocalizedDescriptionKey: "Google TTS API error (\(httpResponse.statusCode)): \(errorMessage)"
-            ])
-        }
-
-        // Google returns JSON with base64-encoded audio
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let audioContentBase64 = json["audioContent"] as? String,
-              let audioData = Data(base64Encoded: audioContentBase64) else {
-            throw NSError(domain: "Managerie", code: 500, userInfo: [
-                NSLocalizedDescriptionKey: "Failed to decode Google TTS response"
-            ])
-        }
-
-        return audioData
-    }
-
-    private func synthesizeWithDeepgram(job: SpeechJob) async throws -> Data {
-        guard let apiKey = DeepgramApiKeyManager.resolvedKey(), !apiKey.isEmpty else {
-            throw NSError(domain: "Managerie", code: 401, userInfo: [
-                NSLocalizedDescriptionKey: "Deepgram API key not found. Add it in settings or import it from ~/.env."
-            ])
-        }
-
-        // Map voice name to Deepgram model ID (default to British Draco)
-        let model = Self.deepgramVoices[job.voice.lowercased()] ?? Self.deepgramVoices["draco"] ?? "aura-2-draco-en"
-
-        var components = URLComponents(string: "https://api.deepgram.com/v1/speak")!
-        components.queryItems = [
-            URLQueryItem(name: "model", value: model)
-        ]
-
-        var request = URLRequest(url: components.url!)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 30
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("audio/mpeg", forHTTPHeaderField: "Accept")
-        request.setValue("Token \(apiKey)", forHTTPHeaderField: "Authorization")
-
-        let body: [String: Any] = [
-            "text": job.text
-        ]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw NSError(domain: "Managerie", code: 500, userInfo: [NSLocalizedDescriptionKey: "Invalid response"])
-        }
-
-        guard httpResponse.statusCode == 200 else {
-            let errorMessage = String(data: data, encoding: .utf8) ?? "Unknown error"
-            throw NSError(domain: "Managerie", code: httpResponse.statusCode, userInfo: [
-                NSLocalizedDescriptionKey: "Deepgram TTS API error (\(httpResponse.statusCode)): \(errorMessage)"
-            ])
-        }
-
-        return data
-    }
-
-    private func synthesizeWithLocal(job: SpeechJob) async throws -> Data {
-        guard LocalTTSRuntime.shared.isModelInstalled() else {
-            throw NSError(domain: "Managerie", code: 503, userInfo: [
-                NSLocalizedDescriptionKey: "Local model not downloaded yet. Open Settings → TTS Provider → Local and download the model."
-            ])
-        }
-
-        return try await LocalTTSRuntime.shared.synthesize(text: job.text, voice: job.voice)
-    }
-
-    private func audioStreamID(job: SpeechJob, runNonce: UUID) -> String {
-        "\(job.historyEntryId.uuidString)-\(runNonce.uuidString)"
-    }
-
-    private func emitAudioMirror(_ event: ManagerieRemoteAudioMirrorEvent) {
-        audioMirrorHandlerLock.lock()
-        let handler = audioMirrorHandler
-        audioMirrorHandlerLock.unlock()
-        handler?(event)
-    }
-
-    private func emitAudioMirrorStart(job: SpeechJob, runNonce: UUID) -> String {
-        let streamId = audioStreamID(job: job, runNonce: runNonce)
-        let mimeType = Self.currentProvider == .local ? "audio/wav" : "audio/mpeg"
-        emitAudioMirror(
-            .start(
-                ManagerieRemoteAudioStart(
-                    streamId: streamId,
-                    sourceApp: job.sourceApp,
-                    sessionId: job.sessionId,
-                    pid: job.pid,
-                    voice: job.voice,
-                    mimeType: mimeType
-                )
-            )
-        )
-        return streamId
-    }
-
-    private func emitAudioMirrorChunk(streamId: String, data: Data) {
-        guard !data.isEmpty else { return }
-        emitAudioMirror(.chunk(ManagerieRemoteAudioChunk(streamId: streamId, chunk: data)))
-    }
-
-    private func emitAudioMirrorEnd(streamId: String, status: String) {
-        emitAudioMirror(.end(ManagerieRemoteAudioEnd(streamId: streamId, status: status)))
-    }
-
-    /// Streaming TTS - uses fast model and streaming API for lower latency.
-    /// Local mode now streams raw PCM from the local runtime endpoint.
-    private func synthesizeAndPlayStreaming(job: SpeechJob, runNonce: UUID) async throws {
-        switch Self.currentProvider {
-        case .elevenlabs:
-            try await synthesizeAndPlayStreamingElevenLabs(job: job, runNonce: runNonce)
-        case .google:
-            // Google doesn't have a simple REST streaming API, so use non-streaming
-            try await synthesizeAndPlayGoogle(job: job, runNonce: runNonce)
-        case .deepgram:
-            // Deepgram streams chunked MPEG over HTTP; play progressively via ffplay stdin.
-            try await synthesizeAndPlayDeepgram(job: job, runNonce: runNonce)
-        case .local:
-            do {
-                try await synthesizeAndPlayStreamingLocal(job: job, runNonce: runNonce)
-            } catch {
-                print("Managerie: Local streaming failed (\(error.localizedDescription)), falling back to buffered playback")
-                do {
-                    try await synthesizeAndPlayLocalBuffered(job: job, runNonce: runNonce)
-                } catch {
-                    print("Managerie: Buffered playback also failed (\(error.localizedDescription)), falling back to plain WAV playback")
-                    try await synthesizeAndPlayLocalPlain(job: job, runNonce: runNonce)
-                }
-            }
-        }
-    }
-
-    /// Google TTS - non-streaming (Google REST API doesn't support streaming)
-    private func synthesizeAndPlayGoogle(job: SpeechJob, runNonce: UUID) async throws {
-        guard let ffplayPath = findFFPlayPath() else {
-            throw NSError(domain: "Managerie", code: 404, userInfo: [
-                NSLocalizedDescriptionKey: "ffplay not found. Install with: brew install ffmpeg"
-            ])
-        }
-
-        let streamId = emitAudioMirrorStart(job: job, runNonce: runNonce)
-        var streamEnded = false
-        defer {
-            if !streamEnded {
-                emitAudioMirrorEnd(streamId: streamId, status: "failed")
-            }
-        }
-
-        // Synthesize the audio
-        let audioData = try await synthesizeWithGoogle(job: job)
-        emitAudioMirrorChunk(streamId: streamId, data: audioData)
-
-        // Check if we should still continue
-        if !shouldContinue(runNonce: runNonce) {
-            streamEnded = true
-            emitAudioMirrorEnd(streamId: streamId, status: "interrupted")
-            return
-        }
-
-        // Write to temp file and play
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("managerie-google-\(UUID().uuidString).mp3")
-        try audioData.write(to: tempURL)
-
-        defer {
-            try? FileManager.default.removeItem(at: tempURL)
-        }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: ffplayPath)
-        process.arguments = [
-            "-nodisp",
-            "-autoexit",
-            "-loglevel", "quiet",
-            tempURL.path
-        ]
-
-        try process.run()
-
-        queue.sync {
-            self.currentProcess = process
-        }
-
-        // Wait for ffplay to finish
-        await withCheckedContinuation { continuation in
-            process.terminationHandler = { _ in
-                continuation.resume()
-            }
-        }
-
-        streamEnded = true
-        emitAudioMirrorEnd(streamId: streamId, status: "completed")
-    }
-
-    /// Deepgram TTS - streaming playback via ffplay stdin.
-    private func synthesizeAndPlayDeepgram(job: SpeechJob, runNonce: UUID) async throws {
-        guard let apiKey = DeepgramApiKeyManager.resolvedKey(), !apiKey.isEmpty else {
-            throw NSError(domain: "Managerie", code: 401, userInfo: [
-                NSLocalizedDescriptionKey: "Deepgram API key not found. Add it in settings or import it from ~/.env."
-            ])
-        }
-
-        guard let ffplayPath = findFFPlayPath() else {
-            throw NSError(domain: "Managerie", code: 404, userInfo: [
-                NSLocalizedDescriptionKey: "ffplay not found. Install with: brew install ffmpeg"
-            ])
-        }
-
-        // Map voice name to Deepgram model ID (default to British Draco)
-        let model = Self.deepgramVoices[job.voice.lowercased()] ?? Self.deepgramVoices["draco"] ?? "aura-2-draco-en"
-
-        var components = URLComponents(string: "https://api.deepgram.com/v1/speak")!
-        components.queryItems = [
-            URLQueryItem(name: "model", value: model),
-            URLQueryItem(name: "encoding", value: "mp3")
-        ]
-
-        var request = URLRequest(url: components.url!)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 60
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("audio/mpeg", forHTTPHeaderField: "Accept")
-        request.setValue("Token \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.httpBody = try JSONSerialization.data(withJSONObject: ["text": job.text])
-
-        let streamId = emitAudioMirrorStart(job: job, runNonce: runNonce)
-        var streamEnded = false
-        defer {
-            if !streamEnded {
-                emitAudioMirrorEnd(streamId: streamId, status: "failed")
-            }
-        }
-
-        let (asyncBytes, response) = try await URLSession.shared.bytes(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw NSError(domain: "Managerie", code: 500, userInfo: [NSLocalizedDescriptionKey: "Invalid response"])
-        }
-
-        guard httpResponse.statusCode == 200 else {
-            var errorData = Data()
-            for try await byte in asyncBytes {
-                errorData.append(byte)
-                if errorData.count > 1200 { break }
-            }
-            let errorMessage = String(data: errorData, encoding: .utf8) ?? "Unknown error"
-            throw NSError(domain: "Managerie", code: httpResponse.statusCode, userInfo: [
-                NSLocalizedDescriptionKey: "Deepgram TTS API error (\(httpResponse.statusCode)): \(errorMessage)"
-            ])
-        }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: ffplayPath)
-
-        let inputPipe = Pipe()
-        process.standardInput = inputPipe
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-
-        var arguments = [
-            "-nodisp",
-            "-autoexit",
-            "-loglevel", "quiet",
-        ]
-        if let tempoFilter = localPlaybackTempoFilter() {
-            arguments.append(contentsOf: ["-af", tempoFilter])
-        }
-        arguments.append("pipe:0")
-        process.arguments = arguments
-
-        try process.run()
-
-        queue.sync {
-            self.currentProcess = process
-        }
-
-        let stdinHandle = inputPipe.fileHandleForWriting
-        var buffer = Data()
-        let flushSize = 4096
-
-        for try await byte in asyncBytes {
-            if !shouldContinue(runNonce: runNonce) {
-                try? stdinHandle.close()
-                process.terminate()
-                streamEnded = true
-                emitAudioMirrorEnd(streamId: streamId, status: "interrupted")
-                return
-            }
-
-            buffer.append(byte)
-            if buffer.count >= flushSize {
-                do {
-                    try stdinHandle.write(contentsOf: buffer)
-                } catch {
-                    throw NSError(domain: "Managerie", code: 500, userInfo: [
-                        NSLocalizedDescriptionKey: "ffplay stdin write failed: \(error.localizedDescription)"
-                    ])
-                }
-                emitAudioMirrorChunk(streamId: streamId, data: buffer)
-                buffer.removeAll(keepingCapacity: true)
-            }
-        }
-
-        if !buffer.isEmpty {
-            do {
-                try stdinHandle.write(contentsOf: buffer)
-            } catch {
-                throw NSError(domain: "Managerie", code: 500, userInfo: [
-                    NSLocalizedDescriptionKey: "ffplay stdin tail write failed: \(error.localizedDescription)"
-                ])
-            }
-            emitAudioMirrorChunk(streamId: streamId, data: buffer)
-        }
-
-        try? stdinHandle.close()
-
-        await withCheckedContinuation { continuation in
-            process.terminationHandler = { _ in
-                continuation.resume()
-            }
-        }
-
-        streamEnded = true
-        emitAudioMirrorEnd(streamId: streamId, status: shouldContinue(runNonce: runNonce) ? "completed" : "interrupted")
-    }
-
-    /// Local on-device TTS via pocket-tts Rust runtime stream endpoint.
-    private func synthesizeAndPlayStreamingLocal(job: SpeechJob, runNonce: UUID) async throws {
-        guard let ffplayPath = findFFPlayPath() else {
-            throw NSError(domain: "Managerie", code: 404, userInfo: [
-                NSLocalizedDescriptionKey: "ffplay not found. Install with: brew install ffmpeg"
-            ])
-        }
-
-        let streamId = emitAudioMirrorStart(job: job, runNonce: runNonce)
-        var streamEnded = false
-        defer {
-            if !streamEnded {
-                emitAudioMirrorEnd(streamId: streamId, status: "failed")
-            }
-        }
-
-        let (asyncBytes, response) = try await LocalTTSRuntime.shared.streamSynthesize(text: job.text, voice: job.voice)
-        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-            throw NSError(domain: "Managerie", code: 500, userInfo: [
-                NSLocalizedDescriptionKey: "Local runtime stream failed"
-            ])
-        }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: ffplayPath)
-        let inputPipe = Pipe()
-        process.standardInput = inputPipe
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-
-        var arguments = [
-            "-f", "s16le",
-            "-ar", "24000",
-        ]
-        arguments.append(contentsOf: rawPCMInputArguments(for: ffplayPath))
-        arguments.append(contentsOf: [
-            "-nodisp",
-            "-autoexit",
-            "-loglevel", "quiet",
-        ])
-        if let tempoFilter = localPlaybackTempoFilter() {
-            arguments.append(contentsOf: ["-af", tempoFilter])
-        }
-        arguments.append("pipe:0")
-        process.arguments = arguments
-
-        try process.run()
-
-        queue.sync {
-            self.currentProcess = process
-        }
-
-        // Some ffplay builds can exit immediately on unsupported flags.
-        try? await Task.sleep(nanoseconds: 50_000_000)
-        guard process.isRunning else {
-            throw NSError(domain: "Managerie", code: 500, userInfo: [
-                NSLocalizedDescriptionKey: "ffplay exited before local stream playback started"
-            ])
-        }
-
-        let stdinHandle = inputPipe.fileHandleForWriting
-        var buffer = Data()
-        var mirroredPCM = Data()
-        let flushSize = 4096
-
-        for try await byte in asyncBytes {
-            if !shouldContinue(runNonce: runNonce) {
-                try? stdinHandle.close()
-                process.terminate()
-                streamEnded = true
-                emitAudioMirrorEnd(streamId: streamId, status: "interrupted")
-                return
-            }
-
-            buffer.append(byte)
-            if buffer.count >= flushSize {
-                do {
-                    try stdinHandle.write(contentsOf: buffer)
-                } catch {
-                    throw NSError(domain: "Managerie", code: 500, userInfo: [
-                        NSLocalizedDescriptionKey: "ffplay stdin write failed: \(error.localizedDescription)"
-                    ])
-                }
-                mirroredPCM.append(buffer)
-                buffer.removeAll(keepingCapacity: true)
-            }
-        }
-
-        if !buffer.isEmpty {
-            do {
-                try stdinHandle.write(contentsOf: buffer)
-            } catch {
-                throw NSError(domain: "Managerie", code: 500, userInfo: [
-                    NSLocalizedDescriptionKey: "ffplay stdin tail write failed: \(error.localizedDescription)"
-                ])
-            }
-            mirroredPCM.append(buffer)
-        }
-
-        try? stdinHandle.close()
-
-        // Local stream endpoint returns raw PCM. Keep mirror payload compatible
-        // with iOS AVAudioPlayer by wrapping PCM into a WAV container.
-        if !mirroredPCM.isEmpty {
-            let wavData = wavFromPCM16Mono24k(mirroredPCM)
-            emitAudioMirrorChunk(streamId: streamId, data: wavData)
-        }
-
-        await withCheckedContinuation { continuation in
-            process.terminationHandler = { _ in
-                continuation.resume()
-            }
-        }
-
-        streamEnded = true
-        emitAudioMirrorEnd(streamId: streamId, status: "completed")
-    }
-
-    /// Fallback local playback path for ffplay variants that cannot handle raw stream args.
-    private func synthesizeAndPlayLocalBuffered(job: SpeechJob, runNonce: UUID) async throws {
-        guard let ffplayPath = findFFPlayPath() else {
-            throw NSError(domain: "Managerie", code: 404, userInfo: [
-                NSLocalizedDescriptionKey: "ffplay not found. Install with: brew install ffmpeg"
-            ])
-        }
-
-        let streamId = emitAudioMirrorStart(job: job, runNonce: runNonce)
-        var streamEnded = false
-        defer {
-            if !streamEnded {
-                emitAudioMirrorEnd(streamId: streamId, status: "failed")
-            }
-        }
-
-        let audioData = try await synthesizeWithLocal(job: job)
-        emitAudioMirrorChunk(streamId: streamId, data: audioData)
-
-        if !shouldContinue(runNonce: runNonce) {
-            streamEnded = true
-            emitAudioMirrorEnd(streamId: streamId, status: "interrupted")
-            return
-        }
-
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("managerie-local-\(UUID().uuidString).wav")
-        try audioData.write(to: tempURL)
-
-        defer {
-            try? FileManager.default.removeItem(at: tempURL)
-        }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: ffplayPath)
-        var arguments = [
-            "-nodisp",
-            "-autoexit",
-            "-loglevel", "quiet",
-        ]
-        if let tempoFilter = localPlaybackTempoFilter() {
-            arguments.append(contentsOf: ["-af", tempoFilter])
-        }
-        arguments.append(tempURL.path)
-        process.arguments = arguments
-
-        try process.run()
-
-        queue.sync {
-            self.currentProcess = process
-        }
-
-        await withCheckedContinuation { continuation in
-            process.terminationHandler = { _ in
-                continuation.resume()
-            }
-        }
-
-        streamEnded = true
-        emitAudioMirrorEnd(streamId: streamId, status: "completed")
-    }
-
-    /// Last-resort fallback: synthesize to WAV, play with simplest possible ffplay args.
-    /// No tempo filter, no special flags — just `ffplay -nodisp -autoexit file.wav`.
-    private func synthesizeAndPlayLocalPlain(job: SpeechJob, runNonce: UUID) async throws {
-        guard let ffplayPath = findFFPlayPath() else {
-            throw NSError(domain: "Managerie", code: 404, userInfo: [
-                NSLocalizedDescriptionKey: "ffplay not found. Install with: brew install ffmpeg"
-            ])
-        }
-
-        let streamId = emitAudioMirrorStart(job: job, runNonce: runNonce)
-        var streamEnded = false
-        defer {
-            if !streamEnded {
-                emitAudioMirrorEnd(streamId: streamId, status: "failed")
-            }
-        }
-
-        let audioData = try await synthesizeWithLocal(job: job)
-        emitAudioMirrorChunk(streamId: streamId, data: audioData)
-
-        if !shouldContinue(runNonce: runNonce) {
-            streamEnded = true
-            emitAudioMirrorEnd(streamId: streamId, status: "interrupted")
-            return
-        }
-
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("managerie-local-plain-\(UUID().uuidString).wav")
-        try audioData.write(to: tempURL)
-        defer { try? FileManager.default.removeItem(at: tempURL) }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: ffplayPath)
-        process.arguments = ["-nodisp", "-autoexit", "-loglevel", "quiet", tempURL.path]
-
-        try process.run()
-        queue.sync { self.currentProcess = process }
-
-        await withCheckedContinuation { continuation in
-            process.terminationHandler = { _ in continuation.resume() }
-        }
-
-        streamEnded = true
-        emitAudioMirrorEnd(streamId: streamId, status: "completed")
-    }
-
-    private func wavFromPCM16Mono24k(_ pcm: Data) -> Data {
-        let sampleRate: UInt32 = 24_000
-        let channels: UInt16 = 1
-        let bitsPerSample: UInt16 = 16
-        let byteRate: UInt32 = sampleRate * UInt32(channels) * UInt32(bitsPerSample / 8)
-        let blockAlign: UInt16 = channels * (bitsPerSample / 8)
-        let subchunk2Size = UInt32(pcm.count)
-        let chunkSize = 36 + subchunk2Size
-
-        var data = Data()
-        data.append("RIFF".data(using: .ascii)!)
-
-        var chunkSizeLE = chunkSize.littleEndian
-        withUnsafeBytes(of: &chunkSizeLE) { data.append(contentsOf: $0) }
-
-        data.append("WAVE".data(using: .ascii)!)
-        data.append("fmt ".data(using: .ascii)!)
-
-        var subchunk1SizeLE = UInt32(16).littleEndian
-        withUnsafeBytes(of: &subchunk1SizeLE) { data.append(contentsOf: $0) }
-
-        var audioFormatLE = UInt16(1).littleEndian
-        withUnsafeBytes(of: &audioFormatLE) { data.append(contentsOf: $0) }
-
-        var channelsLE = channels.littleEndian
-        withUnsafeBytes(of: &channelsLE) { data.append(contentsOf: $0) }
-
-        var sampleRateLE = sampleRate.littleEndian
-        withUnsafeBytes(of: &sampleRateLE) { data.append(contentsOf: $0) }
-
-        var byteRateLE = byteRate.littleEndian
-        withUnsafeBytes(of: &byteRateLE) { data.append(contentsOf: $0) }
-
-        var blockAlignLE = blockAlign.littleEndian
-        withUnsafeBytes(of: &blockAlignLE) { data.append(contentsOf: $0) }
-
-        var bitsPerSampleLE = bitsPerSample.littleEndian
-        withUnsafeBytes(of: &bitsPerSampleLE) { data.append(contentsOf: $0) }
-
-        data.append("data".data(using: .ascii)!)
-
-        var subchunk2SizeLE = subchunk2Size.littleEndian
-        withUnsafeBytes(of: &subchunk2SizeLE) { data.append(contentsOf: $0) }
-
-        data.append(pcm)
-        return data
-    }
-
-    /// ElevenLabs streaming TTS
-    private func synthesizeAndPlayStreamingElevenLabs(job: SpeechJob, runNonce: UUID) async throws {
-        // Get API key from environment, app settings, or ~/.env
-        guard let apiKey = ElevenLabsApiKeyManager.resolvedKey(), !apiKey.isEmpty else {
-            throw NSError(domain: "Managerie", code: 401, userInfo: [
-                NSLocalizedDescriptionKey: "ElevenLabs API key not found. Add it in settings or import it from ~/.env."
-            ])
-        }
-
-        guard let ffplayPath = findFFPlayPath() else {
-            throw NSError(domain: "Managerie", code: 404, userInfo: [
-                NSLocalizedDescriptionKey: "ffplay not found. Install with: brew install ffmpeg"
-            ])
-        }
-
-        var streamId: String?
-        var streamEnded = false
-        defer {
-            if let streamId, !streamEnded {
-                emitAudioMirrorEnd(streamId: streamId, status: "failed")
-            }
-        }
-
-        // Map voice name to ElevenLabs voice ID
-        let voiceId = Self.elevenLabsVoices[job.voice.lowercased()] ?? Self.elevenLabsVoices["ally"] ?? "v2zbX16tJNtRIx8rSHDM"
-
-        // Use streaming endpoint with flash model for lowest latency
-        // Use mp3_44100_64 for good quality with lower bandwidth
-        var urlComponents = URLComponents(string: "https://api.elevenlabs.io/v1/text-to-speech/\(voiceId)/stream")!
-        urlComponents.queryItems = [
-            URLQueryItem(name: "output_format", value: "mp3_44100_64"),
-            URLQueryItem(name: "optimize_streaming_latency", value: "4")
-        ]
-
-        var request = URLRequest(url: urlComponents.url!)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 60
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
-
-        // ElevenLabs has a strict upper bound in practice; cap to 1.2.
-        let speed = elevenLabsConfiguredSpeechSpeed()
-
-        if ProcessInfo.processInfo.environment["MANAGERIE_DEBUG"] == "1" {
-            print("Managerie: Synthesizing with speed=\(speed), voice=\(job.voice), text=\(job.text.prefix(50))...")
-        }
-
-        var voiceSettings: [String: Any] = [
-            "stability": 0.5,
-            "similarity_boost": 0.75
-        ]
-        // Only add speed if not default (some models may not support it)
-        if abs(speed - 1.0) > 0.01 {
-            voiceSettings["speed"] = speed
-        }
-
-        let body: [String: Any] = [
-            "text": job.text,
-            "model_id": "eleven_flash_v2_5",  // Fastest model (~75ms latency)
-            "voice_settings": voiceSettings
-        ]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        // Stream to temp file and start playing once we have some data
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("managerie-stream-\(UUID().uuidString).mp3")
-
-        FileManager.default.createFile(atPath: tempURL.path, contents: nil)
-        let fileHandle = try FileHandle(forWritingTo: tempURL)
-
-        defer {
-            try? fileHandle.close()
-            try? FileManager.default.removeItem(at: tempURL)
-        }
-
-        // Use bytes(for:) to stream the response
-        let (asyncBytes, response) = try await URLSession.shared.bytes(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw NSError(domain: "Managerie", code: 500, userInfo: [NSLocalizedDescriptionKey: "Invalid response"])
-        }
-
-        guard httpResponse.statusCode == 200 else {
-            var errorData = Data()
-            for try await byte in asyncBytes {
-                errorData.append(byte)
-                if errorData.count > 1000 { break }
-            }
-            let errorMessage = String(data: errorData, encoding: .utf8) ?? "Unknown error"
-            throw NSError(domain: "Managerie", code: httpResponse.statusCode, userInfo: [
-                NSLocalizedDescriptionKey: "ElevenLabs API error (\(httpResponse.statusCode)): \(errorMessage)"
-            ])
-        }
-
-        streamId = emitAudioMirrorStart(job: job, runNonce: runNonce)
-
-        // Collect chunks and start playback early
-        var totalBytes = 0
-        var playbackStarted = false
-        var ffplayProcess: Process?
-        var buffer = Data()
-        let flushSize = 4096  // Flush every 4KB
-
-        for try await byte in asyncBytes {
-            if !shouldContinue(runNonce: runNonce) {
-                ffplayProcess?.terminate()
-                if let streamId {
-                    streamEnded = true
-                    emitAudioMirrorEnd(streamId: streamId, status: "interrupted")
-                }
-                return
-            }
-
-            buffer.append(byte)
-            totalBytes += 1
-
-            // Flush buffer periodically
-            if buffer.count >= flushSize {
-                fileHandle.write(buffer)
-                if let streamId {
-                    emitAudioMirrorChunk(streamId: streamId, data: buffer)
-                }
-                buffer.removeAll(keepingCapacity: true)
-            }
-
-            // Start playback after receiving ~16KB of audio data (enough for ffplay to start)
-            if !playbackStarted && totalBytes >= 16384 {
-                playbackStarted = true
-
-                // Flush remaining buffer
-                if !buffer.isEmpty {
-                    fileHandle.write(buffer)
-                    if let streamId {
-                        emitAudioMirrorChunk(streamId: streamId, data: buffer)
-                    }
-                    buffer.removeAll(keepingCapacity: true)
-                }
-                try fileHandle.synchronize()
-
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: ffplayPath)
-                process.arguments = [
-                    "-nodisp",
-                    "-autoexit",
-                    "-loglevel", "quiet",
-                    tempURL.path
-                ]
-
-                try process.run()
-                ffplayProcess = process
-
-                queue.sync {
-                    self.currentProcess = process
-                }
-            }
-        }
-
-        // Flush any remaining buffer
-        if !buffer.isEmpty {
-            fileHandle.write(buffer)
-            if let streamId {
-                emitAudioMirrorChunk(streamId: streamId, data: buffer)
-            }
-        }
-
-        // If we never started playback (very short audio), start it now
-        if !playbackStarted {
-            try fileHandle.synchronize()
-
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: ffplayPath)
-            process.arguments = [
-                "-nodisp",
-                "-autoexit",
-                "-loglevel", "quiet",
-                tempURL.path
-            ]
-
-            try process.run()
-            ffplayProcess = process
-
-            queue.sync {
-                self.currentProcess = process
-            }
-        }
-
-        // Wait for ffplay to finish
-        if let process = ffplayProcess {
-            await withCheckedContinuation { continuation in
-                process.terminationHandler = { _ in
-                    continuation.resume()
-                }
-            }
-        }
-
-        if let streamId {
-            streamEnded = true
-            emitAudioMirrorEnd(streamId: streamId, status: "completed")
-        }
-    }
-
-    private func play(audioData: Data) async throws {
-        guard let ffplayPath = findFFPlayPath() else {
-            throw NSError(domain: "Managerie", code: 404, userInfo: [NSLocalizedDescriptionKey: "ffplay not found. Install with: brew install ffmpeg"])
-        }
-
-        // ElevenLabs returns MP3, save with .mp3 extension
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("managerie-\(UUID().uuidString).mp3")
-        try audioData.write(to: tempURL)
-
-        defer {
-            try? FileManager.default.removeItem(at: tempURL)
-        }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: ffplayPath)
-        process.arguments = [
-            "-nodisp",
-            "-autoexit",
-            "-loglevel", "quiet",
-            tempURL.path
-        ]
-
-        try process.run()
-
-        queue.sync {
-            self.currentProcess = process
-        }
-
-        await withCheckedContinuation { continuation in
-            process.terminationHandler = { _ in
-                continuation.resume()
-            }
-        }
-    }
-
-    private func rawPCMInputArguments(for ffplayPath: String) -> [String] {
-        if let cached = ffplayRawMonoArgsByPath[ffplayPath] {
-            return cached
-        }
-
-        // Default to legacy -ac which works on all ffmpeg/ffplay versions.
-        var detected = ["-ac", "1"]
-
-        let probe = Process()
-        probe.executableURL = URL(fileURLWithPath: ffplayPath)
-        probe.arguments = ["-h", "full"]
-
-        let out = Pipe()
-        let err = Pipe()
-        probe.standardOutput = out
-        probe.standardError = err
-
-        do {
-            try probe.run()
-
-            // Read pipes on background threads BEFORE waitUntilExit to avoid
-            // deadlock when output exceeds the pipe buffer (~16 KB on macOS).
-            // ffplay -h full easily produces 100 KB+.
-            var outputData = Data()
-            var errorData = Data()
-            let group = DispatchGroup()
-
-            group.enter()
-            DispatchQueue.global().async {
-                outputData = out.fileHandleForReading.readDataToEndOfFile()
-                group.leave()
-            }
-
-            group.enter()
-            DispatchQueue.global().async {
-                errorData = err.fileHandleForReading.readDataToEndOfFile()
-                group.leave()
-            }
-
-            probe.waitUntilExit()
-            group.wait()
-
-            var output = outputData
-            output.append(errorData)
-            if let text = String(data: output, encoding: .utf8) {
-                if text.contains("-ch_layout") {
-                    // Modern ffmpeg 5.1+ supports -ch_layout
-                    detected = ["-ch_layout", "mono"]
-                }
-                // Otherwise keep -ac 1
-            }
-        } catch {
-            print("Managerie: ffplay probe failed (\(error.localizedDescription)), using legacy -ac flag")
-        }
-
-        ffplayRawMonoArgsByPath[ffplayPath] = detected
-        return detected
-    }
-
-    private func findFFPlayPath() -> String? {
-        let paths = [
-            "/opt/homebrew/bin/ffplay",
-            "/usr/local/bin/ffplay",
-            "/usr/bin/ffplay"
-        ]
-
-        for path in paths where FileManager.default.fileExists(atPath: path) {
-            return path
-        }
-
-        return nil
-    }
-
-    private func terminateCurrentProcessLocked() {
-        if let player = currentAudioPlayer {
-            debugLog("Managerie: terminateCurrentProcessLocked - stopping AVAudioPlayer")
-            player.stop()
-            currentAudioPlayer = nil
-        }
-
-        guard let process = currentProcess else {
-            if currentAudioPlayer == nil {
-                debugLog("Managerie: terminateCurrentProcessLocked - no current process or player")
-            }
-            return
-        }
-
-        debugLog("Managerie: terminateCurrentProcessLocked - process PID=\(process.processIdentifier), isRunning=\(process.isRunning)")
-        if process.isRunning {
-            process.terminate()
-            let pid = process.processIdentifier
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.25) {
-                if process.isRunning {
-                    debugLog("Managerie: Force killing process PID=\(pid)")
-                    kill(pid, SIGKILL)
-                }
-            }
-        }
-
-        currentProcess = nil
-    }
-
-    private func resolveVoiceForQueueLocked(requestedVoice: String?, queueKey: String) -> String {
-        let trimmedRequested = requestedVoice?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let requested = trimmedRequested, !requested.isEmpty {
-            debugLog("Managerie: resolveVoice(\(queueKey)) = explicit '\(requested)'")
-            return requested
-        }
-
-        if let assigned = autoVoiceByQueueKey[queueKey] {
-            debugLog("Managerie: resolveVoice(\(queueKey)) = cached '\(assigned)'")
-            return assigned
-        }
-
-        // Check all already-assigned voices, not just active queues.
-        // This ensures different sessions get different voices even if they're
-        // not concurrent (e.g., session A finishes before session B starts).
-        let usedVoices = Set(autoVoiceByQueueKey.values)
-
-        if let freeVoice = autoVoicePool.first(where: { !usedVoices.contains($0) }) {
-            autoVoiceByQueueKey[queueKey] = freeVoice
-            debugLog("Managerie: resolveVoice(\(queueKey)) = new free '\(freeVoice)' (used=\(usedVoices))")
-            return freeVoice
-        }
-
-        guard !autoVoicePool.isEmpty else {
-            debugLog("Managerie: resolveVoice(\(queueKey)) = default (empty pool)")
-            return defaultVoiceProvider()
-        }
-
-        let cycled = autoVoicePool[autoVoiceCycleIndex % autoVoicePool.count]
-        autoVoiceCycleIndex += 1
-        autoVoiceByQueueKey[queueKey] = cycled
-        debugLog("Managerie: resolveVoice(\(queueKey)) = cycled '\(cycled)' (all voices used)")
-        return cycled
-    }
-
-    private func queueKey(sourceApp: String?, sessionId: String?) -> String {
-        let app = normalizedSourceApp(sourceApp)
-        let session = normalizedSessionId(sessionId)
-        return "\(app)::\(session)"
-    }
-
-    private func normalizedSourceApp(_ sourceApp: String?) -> String {
-        let trimmed = sourceApp?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (trimmed?.isEmpty == false) ? trimmed! : "unknown"
-    }
-
-    private func normalizedSessionId(_ sessionId: String?) -> String {
-        let trimmed = sessionId?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (trimmed?.isEmpty == false) ? trimmed! : "__none__"
-    }
-
-    private func dequeueNextJobLocked() -> (String, SpeechJob)? {
-        while !queueOrder.isEmpty {
-            let key = queueOrder.first!
-
-            guard var jobs = queuesByKey[key], !jobs.isEmpty else {
-                queueOrder.removeFirst()
-                queuesByKey.removeValue(forKey: key)
-                continue
-            }
-
-            let job = jobs.removeFirst()
-
-            if jobs.isEmpty {
-                // Queue for this session is empty, remove it and move to next
-                queueOrder.removeFirst()
-                queuesByKey.removeValue(forKey: key)
-            } else {
-                // Keep processing this session's queue (don't move to end)
-                queuesByKey[key] = jobs
-            }
-
-            return (key, job)
-        }
-
-        return nil
-    }
-
-    private func allPendingHistoryIdsLocked() -> [UUID] {
-        queuesByKey.values.flatMap { $0.map(\.historyEntryId) }
-    }
-
-    private func pendingCountLocked() -> Int {
-        queuesByKey.values.reduce(0) { $0 + $1.count }
-    }
-}
 
 
 /// Shared request pipeline for both transports: the file event spool (primary)
 /// and the TCP broker (legacy compat for old pi-talk sessions).
 final class BrokerRequestProcessor {
     private let decoder = JSONDecoder()
-    private let coordinator: SpeechPlaybackCoordinator
 
-    init(coordinator: SpeechPlaybackCoordinator) {
-        self.coordinator = coordinator
+    /// Record an agent message: history entry + macOS notification.
+    /// `speak` is the legacy wire verb; it means "deliver this message".
+    @discardableResult
+    static func deliver(text: String, sourceApp: String?, sessionId: String?, pid: Int?) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        RequestHistoryStore.shared.add(
+            text: trimmed,
+            sourceApp: sourceApp,
+            sessionId: sessionId,
+            pid: pid
+        )
+        AgentNotificationManager.shared.postAgentMessage(
+            text: trimmed,
+            sourceApp: sourceApp,
+            sessionId: sessionId,
+            pid: pid
+        )
+        return true
     }
 
     func process(_ line: Data) -> BrokerResponse {
@@ -2515,29 +690,25 @@ final class BrokerRequestProcessor {
 
         switch request.type {
         case "health":
-            let state = coordinator.state()
-            debugLog("Managerie Broker: health check - pending=\(state.pending), playing=\(state.playing)")
-            return .success(pending: state.pending, playing: state.playing, currentQueue: state.currentQueue)
+            return .success()
 
         case "speak":
             guard let text = request.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                debugLog("Managerie Broker: speak request missing text")
+                debugLog("Managerie Broker: message request missing text")
                 return .failure("Missing text")
             }
 
-            let queued = coordinator.enqueue(
+            Self.deliver(
                 text: text,
-                voice: request.voice,
                 sourceApp: request.sourceApp,
                 sessionId: request.sessionId,
                 pid: AgentProcessResolver.canonicalPid(for: request.pid, sourceApp: request.sourceApp)
             )
-            return .success(queued: queued)
+            return .success()
 
         case "stop":
-            coordinator.stopForSource(sourceApp: request.sourceApp, sessionId: request.sessionId)
-            let state = coordinator.state()
-            return .success(pending: state.pending, playing: state.playing, currentQueue: state.currentQueue)
+            // Retained as a no-op so existing clients don't error.
+            return .success()
 
         case "status":
             guard let pid = AgentProcessResolver.canonicalPid(for: request.pid, sourceApp: request.sourceApp) else {
@@ -2567,11 +738,11 @@ final class BrokerRequestProcessor {
 
 final class LocalSpeechBroker {
     private let listener: NWListener
-    private let queue = DispatchQueue(label: "loqui.local.broker")
+    private let queue = DispatchQueue(label: "managerie.local.broker")
     private let encoder = JSONEncoder()
     private let processor: BrokerRequestProcessor
 
-    init(port: Int, coordinator: SpeechPlaybackCoordinator) throws {
+    init(port: Int) throws {
         guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
             throw NSError(domain: "Managerie", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid broker port: \(port)"])
         }
@@ -2579,7 +750,7 @@ final class LocalSpeechBroker {
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
         self.listener = try NWListener(using: params, on: nwPort)
-        self.processor = BrokerRequestProcessor(coordinator: coordinator)
+        self.processor = BrokerRequestProcessor()
     }
 
     func start() {
@@ -2769,12 +940,6 @@ struct SessionsTabView: View {
 
             // Footer
             HStack(spacing: 10) {
-                if monitor.speakingCount > 0 || monitor.totalQueuedItems > 0 {
-                    Button("Stop All") {
-                        monitor.stopAll()
-                    }
-                    .controlSize(.small)
-                }
 
                 if let message = monitor.lastMessage, !message.isEmpty {
                     Text(message)
@@ -3149,175 +1314,17 @@ struct SettingsRow<Content: View>: View {
 }
 
 struct SettingsTabView: View {
-    @AppStorage("ttsProvider") var provider = "elevenlabs"
-    @AppStorage("ttsVoice") var voice = "ally"
-    @AppStorage("elevenLabsApiKey") var elevenLabsApiKey = ""
-    @AppStorage("googleTtsApiKey") var googleApiKey = ""
-    @AppStorage("deepgramApiKey") var deepgramApiKey = ""
-    @AppStorage("ttsEnabled") var ttsEnabled = false
     @AppStorage("notificationsEnabled") var notificationsEnabled = true
     @AppStorage("notifyOnlyWhenIdle") var notifyOnlyWhenIdle = false
     @AppStorage("notificationChimeEnabled") var notificationChimeEnabled = true
     @AppStorage(AgentNotificationManager.soundKey) var notificationSoundRaw = NotificationSound.pop.rawValue
     @AppStorage("launchAtLogin") var launchAtLogin = false
     @AppStorage("showDockIcon") var showDockIcon = true
-    @State private var isPreviewPlaying = false
-    @State private var showApiKey = false
-    @State private var envImportMessage: String?
-    @State private var envImportMessageColor: Color = .secondary
-    @State private var localModelInstalled = LocalTTSRuntime.shared.isModelInstalled()
-    @State private var localModelDownloading = false
-    @State private var localModelMessage: String?
-    @State private var localModelMessageColor: Color = .secondary
-
-    private var currentProvider: SpeechPlaybackCoordinator.TTSProvider {
-        SpeechPlaybackCoordinator.TTSProvider(rawValue: provider) ?? .elevenlabs
-    }
-
-    // ElevenLabs voices - British & Scottish
-    let elevenLabsVoices = ["ally", "dorothy", "lily", "alice", "dave", "joseph"]
-
-    // Google voices - British & Australian
-    let googleVoices = ["george", "emma", "oliver", "sophia", "charlotte", "william", "jack", "olivia", "isla", "liam"]
-
-    // Deepgram voices - British, Australian, and Irish
-    let deepgramVoices = ["draco", "pandora", "hyperion", "theia", "angus"]
-
-    // Local on-device voices (pocket-tts)
-    let localVoices = [
-        "alba", "vera", "paul", "charles", "michael", "anna",
-        "fantine", "eponine", "cosette", "eve", "george", "mary",
-        "marius", "javert", "azelma", "caro_davy", "peter_yearsley",
-        "stuart_bell"
-    ]
-
-    private var availableVoices: [String] {
-        switch currentProvider {
-        case .elevenlabs:
-            return elevenLabsVoices
-        case .google:
-            return googleVoices
-        case .deepgram:
-            return deepgramVoices
-        case .local:
-            return localVoices
-        }
-    }
-
-    private var trimmedElevenLabsApiKey: String {
-        elevenLabsApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private var trimmedGoogleApiKey: String {
-        googleApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private var trimmedDeepgramApiKey: String {
-        deepgramApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private var effectiveApiKey: String? {
-        switch currentProvider {
-        case .elevenlabs:
-            if !trimmedElevenLabsApiKey.isEmpty { return trimmedElevenLabsApiKey }
-            return ElevenLabsApiKeyManager.resolvedKey()
-        case .google:
-            if !trimmedGoogleApiKey.isEmpty { return trimmedGoogleApiKey }
-            return GoogleApiKeyManager.resolvedKey()
-        case .deepgram:
-            if !trimmedDeepgramApiKey.isEmpty { return trimmedDeepgramApiKey }
-            return DeepgramApiKeyManager.resolvedKey()
-        case .local:
-            return nil
-        }
-    }
-
-    private var hasApiKey: Bool {
-        currentProvider == .local || effectiveApiKey?.isEmpty == false
-    }
-
-    private var hasElevenLabsKey: Bool {
-        !trimmedElevenLabsApiKey.isEmpty || !(ElevenLabsApiKeyManager.resolvedKey()?.isEmpty ?? true)
-    }
-
-    private var hasGoogleApiKey: Bool {
-        !trimmedGoogleApiKey.isEmpty || !(GoogleApiKeyManager.resolvedKey()?.isEmpty ?? true)
-    }
-
-    private var hasDeepgramApiKey: Bool {
-        !trimmedDeepgramApiKey.isEmpty || !(DeepgramApiKeyManager.resolvedKey()?.isEmpty ?? true)
-    }
-
-    private var localRuntimeAvailable: Bool {
-        LocalTTSRuntime.shared.isRuntimeAvailable()
-    }
-
-    private var providerSummary: String {
-        switch currentProvider {
-        case .elevenlabs:
-            return "Streaming support • Best quality"
-        case .google:
-            return "No streaming • Good quality"
-        case .deepgram:
-            return "Cloud API • Fast quality"
-        case .local:
-            return "On-device Rust runtime • No API key • Bundled model or GitHub release download (~225MB) plus voice prompts"
-        }
-    }
-
-    private var apiSectionTitle: String {
-        switch currentProvider {
-        case .elevenlabs: return "ElevenLabs API"
-        case .google: return "Google Cloud API"
-        case .deepgram: return "Deepgram API"
-        case .local: return "API"
-        }
-    }
-
-    private var apiKeyPlaceholderMessage: String {
-        switch currentProvider {
-        case .elevenlabs: return "Add your ElevenLabs API key to start using Managerie."
-        case .google: return "Add your Google Cloud API key to start using Managerie."
-        case .deepgram: return "Add your Deepgram API key to start using Managerie."
-        case .local: return ""
-        }
-    }
-
-    private var apiKeyEnvHint: String {
-        switch currentProvider {
-        case .elevenlabs: return "Looks for ELEVEN_API_KEY or ELEVENLABS_API_KEY"
-        case .google: return "Looks for GOOGLE_TTS_API_KEY"
-        case .deepgram: return "Looks for DEEPGRAM_API_KEY or DEEPGRAM_TTS_API_KEY"
-        case .local: return ""
-        }
-    }
-
-    private var apiKeySourceHint: String {
-        switch currentProvider {
-        case .elevenlabs: return "Get your API key from elevenlabs.io"
-        case .google: return "Get your API key from console.cloud.google.com"
-        case .deepgram: return "Get your API key from deepgram.com"
-        case .local: return ""
-        }
-    }
-
-    private var currentApiKeyBinding: Binding<String> {
-        switch currentProvider {
-        case .elevenlabs:
-            return $elevenLabsApiKey
-        case .google:
-            return $googleApiKey
-        case .deepgram:
-            return $deepgramApiKey
-        case .local:
-            return .constant("")
-        }
-    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                // NOTIFICATIONS (primary channel)
+                // NOTIFICATIONS
                 Group {
                     SettingsSectionHeader(title: "Notifications")
 
@@ -3354,234 +1361,10 @@ struct SettingsTabView: View {
                             .labelsHidden()
                             .frame(width: 130)
                             .onChange(of: notificationSoundRaw) { newValue in
-                                // Instant preview of the chosen chime
                                 NotificationSound(rawValue: newValue)?.play()
                             }
                         }
                     }
-
-                    SettingsRow("Voice Playback (TTS)", subtitle: "Optional: also speak agent messages aloud") {
-                        Toggle("", isOn: $ttsEnabled)
-                            .labelsHidden()
-                            .toggleStyle(.switch)
-                            .controlSize(.small)
-                    }
-                }
-
-                if ttsEnabled {
-                // TTS PROVIDER
-                SettingsSectionHeader(title: "TTS Provider")
-
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack(spacing: 10) {
-                        providerCard(
-                            key: "elevenlabs",
-                            title: "ElevenLabs",
-                            subtitle: "Streaming · Cloud API",
-                            status: hasElevenLabsKey ? "API key ready" : "API key needed",
-                            statusColor: hasElevenLabsKey ? .green : .orange
-                        )
-
-                        providerCard(
-                            key: "google",
-                            title: "Google Cloud",
-                            subtitle: "Cloud API",
-                            status: hasGoogleApiKey ? "API key ready" : "API key needed",
-                            statusColor: hasGoogleApiKey ? .green : .orange
-                        )
-
-                        providerCard(
-                            key: "deepgram",
-                            title: "Deepgram",
-                            subtitle: "Cloud API",
-                            status: hasDeepgramApiKey ? "API key ready" : "API key needed",
-                            statusColor: hasDeepgramApiKey ? .green : .orange
-                        )
-
-                        providerCard(
-                            key: "local",
-                            title: "Local",
-                            subtitle: "On-device",
-                            status: localModelInstalled ? "Model ready" : "Model optional",
-                            statusColor: localModelInstalled ? .green : .secondary
-                        )
-                    }
-
-                    Text(providerSummary)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .padding(.vertical, 10)
-
-                if currentProvider == .local {
-                    SettingsSectionHeader(title: "Local Model")
-
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack(spacing: 6) {
-                            Image(systemName: localRuntimeAvailable ? "cpu.fill" : "exclamationmark.triangle.fill")
-                                .foregroundColor(localRuntimeAvailable ? .green : .orange)
-                                .font(.caption)
-                            Text(localRuntimeAvailable ? "Local runtime ready" : "Local runtime binary not found")
-                                .font(.caption)
-                                .foregroundColor(localRuntimeAvailable ? .green : .orange)
-                        }
-
-                        HStack(spacing: 6) {
-                            Image(systemName: localModelInstalled ? "checkmark.circle.fill" : "arrow.down.circle")
-                                .foregroundColor(localModelInstalled ? .green : .secondary)
-                                .font(.caption)
-                            Text(localModelInstalled ? "Model downloaded" : "Model not downloaded")
-                                .font(.caption)
-                                .foregroundColor(localModelInstalled ? .green : .secondary)
-                        }
-
-                        Button(localModelDownloading ? "Downloading…" : (localModelInstalled ? "Re-download Local Model + Voices" : "Download Local Model + Voices (~225 MB)")) {
-                            downloadLocalModel()
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .disabled(localModelDownloading || !localRuntimeAvailable)
-
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("Model Download Path")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-
-                            HStack(alignment: .top, spacing: 8) {
-                                Text(LocalTTSRuntime.shared.downloadedModelsPath())
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundColor(.secondary)
-                                    .textSelection(.enabled)
-                                    .lineLimit(2)
-                                    .truncationMode(.middle)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                                Button("Copy") {
-                                    let path = LocalTTSRuntime.shared.downloadedModelsPath()
-                                    NSPasteboard.general.clearContents()
-                                    NSPasteboard.general.setString(path, forType: .string)
-                                }
-                                .buttonStyle(.bordered)
-                                .controlSize(.mini)
-                            }
-                        }
-
-                        Text("If bundled with the app, models are used offline immediately. Otherwise, Managerie downloads a model pack from the matching GitHub release into this path, then caches supported voice prompts.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-
-                        if let localModelMessage {
-                            Text(localModelMessage)
-                                .font(.caption)
-                                .foregroundStyle(localModelMessageColor)
-                        }
-                    }
-                    .padding(.vertical, 10)
-                } else {
-                    // API KEY
-                    SettingsSectionHeader(title: apiSectionTitle)
-
-                    VStack(alignment: .leading, spacing: 12) {
-                        if !hasApiKey {
-                            Text(apiKeyPlaceholderMessage)
-                                .font(.subheadline)
-                                .foregroundColor(.orange)
-                        }
-
-                        HStack(spacing: 8) {
-                            Group {
-                                if showApiKey {
-                                    TextField("API Key", text: currentApiKeyBinding)
-                                } else {
-                                    SecureField("API Key", text: currentApiKeyBinding)
-                                }
-                            }
-                            .textFieldStyle(.plain)
-                            .padding(8)
-                            .background(Color(NSColor.textBackgroundColor))
-                            .cornerRadius(6)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
-                            )
-
-                            Button(showApiKey ? "Hide" : "Show") {
-                                showApiKey.toggle()
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                        }
-
-                        HStack(spacing: 12) {
-                            Button("Import from ~/.env") {
-                                switch currentProvider {
-                                case .elevenlabs:
-                                    importElevenLabsApiKey()
-                                case .google:
-                                    importGoogleApiKey()
-                                case .deepgram:
-                                    importDeepgramApiKey()
-                                case .local:
-                                    break
-                                }
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-
-                            Text(apiKeyEnvHint)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-
-                        if let envImportMessage {
-                            Text(envImportMessage)
-                                .font(.caption)
-                                .foregroundStyle(envImportMessageColor)
-                        }
-
-                        HStack(spacing: 4) {
-                            if hasApiKey {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundColor(.green)
-                                    .font(.caption)
-                                Text("API key configured")
-                                    .font(.caption)
-                                    .foregroundColor(.green)
-                            } else {
-                                Image(systemName: "arrow.up.right")
-                                    .foregroundColor(.orange)
-                                    .font(.caption)
-                                Text(apiKeySourceHint)
-                                    .font(.caption)
-                                    .foregroundColor(.orange)
-                            }
-                        }
-                    }
-                    .padding(.vertical, 10)
-                }
-
-                // VOICE
-                SettingsSectionHeader(title: "Voice")
-
-                SettingsRow("Voice", subtitle: currentProvider == .local ? nil : voiceDescription(voice)) {
-                    HStack(spacing: 12) {
-                        Picker("", selection: $voice) {
-                            ForEach(availableVoices, id: \.self) { v in
-                                Text(v.capitalized).tag(v)
-                            }
-                        }
-                        .labelsHidden()
-                        .frame(width: 120)
-
-                        Button(isPreviewPlaying ? "Playing…" : "Preview") {
-                            previewVoice(voice)
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .disabled(isPreviewPlaying || !hasApiKey || (currentProvider == .local && (!localRuntimeAvailable || !localModelInstalled)))
-                    }
-                }
-
                 }
 
                 // GENERAL
@@ -3615,447 +1398,12 @@ struct SettingsTabView: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
         }
-        .onAppear {
-            refreshLocalModelStatus()
-            selectProvider(provider)
-        }
-
-    }
-
-    @ViewBuilder
-    private func providerCard(key: String,
-                              title: String,
-                              subtitle: String,
-                              status: String,
-                              statusColor: Color) -> some View {
-        Button {
-            selectProvider(key)
-        } label: {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(title)
-                        .font(.subheadline.weight(.bold))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                    Spacer()
-                    if provider == key {
-                        Image(systemName: "checkmark")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundColor(.accentColor)
-                    }
-                }
-
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-
-                Text(status)
-                    .font(.caption)
-                    .foregroundColor(statusColor)
-            }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
-            .frame(height: 90)
-            .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(Color(NSColor.controlBackgroundColor))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(provider == key ? Color.accentColor : Color.secondary.opacity(0.2), lineWidth: provider == key ? 2 : 1)
-            )
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func selectProvider(_ newValue: String) {
-        provider = newValue
-
-        if newValue == "elevenlabs" && !elevenLabsVoices.contains(voice) {
-            voice = "ally"
-        } else if newValue == "google" && !googleVoices.contains(voice) {
-            voice = "george"
-        } else if newValue == "deepgram" && !deepgramVoices.contains(voice) {
-            voice = "draco"
-        } else if newValue == "local" && !localVoices.contains(voice) {
-            voice = "fantine"
-        }
-
-        // Clear cached voice assignments so sessions get voices from the new provider's pool
-        AppDelegate.shared?.speechCoordinator?.clearVoiceAssignments()
-
-        if newValue != "local" {
-            LocalTTSRuntime.shared.stopServer()
-        }
-    }
-
-    func refreshLocalModelStatus() {
-        localModelInstalled = LocalTTSRuntime.shared.isModelInstalled()
-        if localModelInstalled, localModelMessage == nil {
-            localModelMessage = "Local model is ready."
-            localModelMessageColor = .green
-        }
-    }
-
-    func downloadLocalModel() {
-        guard !localModelDownloading else { return }
-        localModelDownloading = true
-        localModelMessage = nil
-
-        Task {
-            do {
-                try await LocalTTSRuntime.shared.downloadModelIfNeeded(preferredVoice: voice)
-                await MainActor.run {
-                    localModelDownloading = false
-                    localModelInstalled = LocalTTSRuntime.shared.isModelInstalled()
-                    localModelMessage = localModelInstalled
-                        ? "Local model and voices downloaded successfully."
-                        : "Model download finished, but files were not detected."
-                    localModelMessageColor = localModelInstalled ? .green : .orange
-                }
-            } catch {
-                await MainActor.run {
-                    localModelDownloading = false
-                    localModelInstalled = LocalTTSRuntime.shared.isModelInstalled()
-                    localModelMessage = error.localizedDescription
-                    localModelMessageColor = .orange
-                }
-            }
-        }
-    }
-
-    func voiceDescription(_ voice: String) -> String {
-        switch voice.lowercased() {
-        case "george": return "British male (Studio quality)"
-        case "emma": return "British female (Studio quality)"
-        case "oliver": return "British male (Neural2)"
-        case "sophia": return "British female (Neural2)"
-        case "charlotte": return "British female (Neural2)"
-        case "william": return "British male (Neural2)"
-        case "jack": return "Australian male (Neural2)"
-        case "olivia": return "Australian female (Neural2)"
-        case "isla": return "Australian female (Neural2)"
-        case "liam": return "Australian male (Neural2)"
-        case "draco": return "British male (Aura-2)"
-        case "pandora": return "British female (Aura-2)"
-        case "hyperion": return "Australian male (Aura-2)"
-        case "theia": return "Australian female (Aura-2)"
-        case "angus": return "Irish male (Aura)"
-        default: return ""
-        }
     }
 
     func updateDockIcon() {
         if let appDelegate = NSApp.delegate as? AppDelegate {
             appDelegate.updateDockIconVisibility()
         }
-    }
-
-    func importElevenLabsApiKey() {
-        switch ElevenLabsApiKeyManager.importFromDotEnv(overwriteExisting: true) {
-        case .imported:
-            elevenLabsApiKey = UserDefaults.standard.string(forKey: ElevenLabsApiKeyManager.userDefaultsKey) ?? elevenLabsApiKey
-            envImportMessage = "Imported API key from ~/.env"
-            envImportMessageColor = .green
-        case .missingFile:
-            envImportMessage = "No ~/.env file found"
-            envImportMessageColor = .orange
-        case .keyNotFound:
-            envImportMessage = "No ELEVEN_API_KEY or ELEVENLABS_API_KEY found in ~/.env"
-            envImportMessageColor = .orange
-        case .skippedExisting:
-            envImportMessage = "API key already configured"
-            envImportMessageColor = .secondary
-        }
-    }
-
-    func importGoogleApiKey() {
-        switch GoogleApiKeyManager.importFromDotEnv(overwriteExisting: true) {
-        case .imported:
-            googleApiKey = UserDefaults.standard.string(forKey: GoogleApiKeyManager.userDefaultsKey) ?? googleApiKey
-            envImportMessage = "Imported API key from ~/.env"
-            envImportMessageColor = .green
-        case .missingFile:
-            envImportMessage = "No ~/.env file found"
-            envImportMessageColor = .orange
-        case .keyNotFound:
-            envImportMessage = "No GOOGLE_TTS_API_KEY found in ~/.env"
-            envImportMessageColor = .orange
-        case .skippedExisting:
-            envImportMessage = "API key already configured"
-            envImportMessageColor = .secondary
-        }
-    }
-
-    func importDeepgramApiKey() {
-        switch DeepgramApiKeyManager.importFromDotEnv(overwriteExisting: true) {
-        case .imported:
-            deepgramApiKey = UserDefaults.standard.string(forKey: DeepgramApiKeyManager.userDefaultsKey) ?? deepgramApiKey
-            envImportMessage = "Imported API key from ~/.env"
-            envImportMessageColor = .green
-        case .missingFile:
-            envImportMessage = "No ~/.env file found"
-            envImportMessageColor = .orange
-        case .keyNotFound:
-            envImportMessage = "No DEEPGRAM_API_KEY or DEEPGRAM_TTS_API_KEY found in ~/.env"
-            envImportMessageColor = .orange
-        case .skippedExisting:
-            envImportMessage = "API key already configured"
-            envImportMessageColor = .secondary
-        }
-    }
-
-    func previewVoice(_ voiceName: String) {
-        guard !isPreviewPlaying else { return }
-
-        if currentProvider != .local {
-            let providerForPreview = currentProvider
-            guard let apiKey = effectiveApiKey, !apiKey.isEmpty else { return }
-            isPreviewPlaying = true
-
-            let text = "Hi, this is \(voiceName.capitalized). I'm ready to help you with your coding projects."
-
-            Task {
-                do {
-                    let audioData: Data
-                    let fileExtension: String
-
-                    switch providerForPreview {
-                    case .elevenlabs:
-                        audioData = try await previewElevenLabsVoice(voiceName: voiceName, text: text, apiKey: apiKey)
-                        fileExtension = "mp3"
-                    case .google:
-                        audioData = try await previewGoogleVoice(voiceName: voiceName, text: text, apiKey: apiKey)
-                        fileExtension = "mp3"
-                    case .deepgram:
-                        audioData = try await previewDeepgramVoice(voiceName: voiceName, text: text, apiKey: apiKey)
-                        fileExtension = "mp3"
-                    case .local:
-                        await MainActor.run {
-                            isPreviewPlaying = false
-                        }
-                        return
-                    }
-
-                    let tempFile = FileManager.default.temporaryDirectory
-                        .appendingPathComponent("voice_preview.\(fileExtension)")
-                    try audioData.write(to: tempFile)
-
-                    let ffplayPath = ["/opt/homebrew/bin/ffplay", "/usr/local/bin/ffplay"].first {
-                        FileManager.default.fileExists(atPath: $0)
-                    }
-
-                    let process = Process()
-                    if let ffplay = ffplayPath {
-                        process.executableURL = URL(fileURLWithPath: ffplay)
-                        process.arguments = ["-nodisp", "-autoexit", "-loglevel", "quiet", tempFile.path]
-                    } else {
-                        process.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
-                        process.arguments = [tempFile.path]
-                    }
-
-                    process.terminationHandler = { _ in
-                        DispatchQueue.main.async {
-                            self.isPreviewPlaying = false
-                        }
-                        try? FileManager.default.removeItem(at: tempFile)
-                    }
-                    try process.run()
-                } catch {
-                    print("Voice preview error: \(error)")
-                    await MainActor.run {
-                        isPreviewPlaying = false
-                    }
-                }
-            }
-            return
-        }
-
-        // Local preview
-        guard localRuntimeAvailable else {
-            localModelMessage = "Local runtime binary not found. Reinstall Managerie or install pocket-tts-cli."
-            localModelMessageColor = .orange
-            return
-        }
-        guard localModelInstalled else {
-            localModelMessage = "Download the local model first."
-            localModelMessageColor = .orange
-            return
-        }
-
-        isPreviewPlaying = true
-        let text = "Hi, this is \(voiceName.capitalized). I am running locally on your Mac."
-
-        Task {
-            do {
-                let audioData = try await LocalTTSRuntime.shared.synthesize(text: text, voice: voiceName)
-                let tempFile = FileManager.default.temporaryDirectory.appendingPathComponent("voice_preview.wav")
-                try audioData.write(to: tempFile)
-
-                let ffplayPath = ["/opt/homebrew/bin/ffplay", "/usr/local/bin/ffplay"].first {
-                    FileManager.default.fileExists(atPath: $0)
-                }
-
-                let process = Process()
-                if let ffplay = ffplayPath {
-                    process.executableURL = URL(fileURLWithPath: ffplay)
-                    var args = ["-nodisp", "-autoexit", "-loglevel", "quiet"]
-                    if let tempoFilter = localPreviewTempoFilter() {
-                        args.append(contentsOf: ["-af", tempoFilter])
-                    }
-                    args.append(tempFile.path)
-                    process.arguments = args
-                } else {
-                    process.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
-                    process.arguments = [tempFile.path]
-                }
-
-                process.terminationHandler = { _ in
-                    DispatchQueue.main.async {
-                        self.isPreviewPlaying = false
-                    }
-                    try? FileManager.default.removeItem(at: tempFile)
-                }
-                try process.run()
-            } catch {
-                print("Voice preview error: \(error)")
-                await MainActor.run {
-                    isPreviewPlaying = false
-                    localModelMessage = error.localizedDescription
-                    localModelMessageColor = .orange
-                }
-            }
-        }
-    }
-
-    private func localPreviewTempoFilter() -> String? {
-        let raw = UserDefaults.standard.object(forKey: "speechSpeed") as? Double ?? 1.0
-        let speed = min(2.0, max(0.7, (raw * 100).rounded() / 100))
-        guard abs(speed - 1.0) > 0.01 else { return nil }
-        return String(format: "atempo=%.2f", speed)
-    }
-
-    func previewElevenLabsVoice(voiceName: String, text: String, apiKey: String) async throws -> Data {
-        let voiceIds: [String: String] = [
-            "ally": "v2zbX16tJNtRIx8rSHDM",
-            "dorothy": "ThT5KcBeYPX3keUQqHPh",
-            "lily": "pFZP5JQG7iQjIQuC4Bku",
-            "alice": "Xb7hH8MSUJpSbSDYk0k2",
-            "dave": "CYw3kZ02Hs0563khs1Fj",
-            "joseph": "Zlb1dXrM653N07WRdFW3",
-        ]
-
-        let voiceId = voiceIds[voiceName.lowercased()] ?? "v2zbX16tJNtRIx8rSHDM"
-        let url = URL(string: "https://api.elevenlabs.io/v1/text-to-speech/\(voiceId)")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
-        request.setValue("audio/mpeg", forHTTPHeaderField: "Accept")
-
-        let body: [String: Any] = [
-            "text": text,
-            "model_id": "eleven_monolingual_v1",
-            "voice_settings": [
-                "stability": 0.5,
-                "similarity_boost": 0.75
-            ]
-        ]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-            throw NSError(domain: "Managerie", code: 500, userInfo: [NSLocalizedDescriptionKey: "ElevenLabs API error"])
-        }
-
-        return data
-    }
-
-    func previewGoogleVoice(voiceName: String, text: String, apiKey: String) async throws -> Data {
-        let googleVoices: [String: (voiceName: String, languageCode: String)] = [
-            "george": ("en-GB-Studio-B", "en-GB"),
-            "emma": ("en-GB-Studio-C", "en-GB"),
-            "oliver": ("en-GB-Neural2-B", "en-GB"),
-            "sophia": ("en-GB-Neural2-A", "en-GB"),
-            "charlotte": ("en-GB-Neural2-C", "en-GB"),
-            "william": ("en-GB-Neural2-D", "en-GB"),
-            "jack": ("en-AU-Neural2-B", "en-AU"),
-            "olivia": ("en-AU-Neural2-A", "en-AU"),
-            "isla": ("en-AU-Neural2-C", "en-AU"),
-            "liam": ("en-AU-Neural2-D", "en-AU"),
-        ]
-
-        let voiceConfig = googleVoices[voiceName.lowercased()] ?? ("en-GB-Studio-B", "en-GB")
-        let url = URL(string: "https://texttospeech.googleapis.com/v1/text:synthesize?key=\(apiKey)")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
-
-        let body: [String: Any] = [
-            "input": ["text": text],
-            "voice": [
-                "languageCode": voiceConfig.languageCode,
-                "name": voiceConfig.voiceName
-            ],
-            "audioConfig": [
-                "audioEncoding": "MP3",
-                "speakingRate": 1.0,
-                "pitch": 0
-            ]
-        ]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-            throw NSError(domain: "Managerie", code: 500, userInfo: [NSLocalizedDescriptionKey: "Google TTS API error"])
-        }
-
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let audioContentBase64 = json["audioContent"] as? String,
-              let audioData = Data(base64Encoded: audioContentBase64) else {
-            throw NSError(domain: "Managerie", code: 500, userInfo: [NSLocalizedDescriptionKey: "Failed to decode Google response"])
-        }
-
-        return audioData
-    }
-
-    func previewDeepgramVoice(voiceName: String, text: String, apiKey: String) async throws -> Data {
-        let deepgramVoices: [String: String] = [
-            "draco": "aura-2-draco-en",
-            "pandora": "aura-2-pandora-en",
-            "hyperion": "aura-2-hyperion-en",
-            "theia": "aura-2-theia-en",
-            "angus": "aura-angus-en",
-        ]
-
-        let model = deepgramVoices[voiceName.lowercased()] ?? "aura-2-draco-en"
-
-        var components = URLComponents(string: "https://api.deepgram.com/v1/speak")!
-        components.queryItems = [
-            URLQueryItem(name: "model", value: model)
-        ]
-
-        var request = URLRequest(url: components.url!)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("audio/mpeg", forHTTPHeaderField: "Accept")
-        request.setValue("Token \(apiKey)", forHTTPHeaderField: "Authorization")
-
-        let body: [String: Any] = [
-            "text": text
-        ]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-            let message = String(data: data, encoding: .utf8) ?? "Deepgram TTS API error"
-            throw NSError(domain: "Managerie", code: 500, userInfo: [NSLocalizedDescriptionKey: message])
-        }
-
-        return data
     }
 
     func setLaunchAtLogin(enabled: Bool) {
@@ -4369,12 +1717,6 @@ struct HistoryView: View {
                         .font(.system(.caption2, design: .monospaced))
                         .foregroundColor(.secondary)
                 }
-                if entry.status == .interrupted {
-                    let shortcutText = KeyboardShortcutManager.shared.bindings[.stopSpeech]?.displayString ?? "⌘."
-                    Label("Stopped via \(shortcutText)", systemImage: "stop.fill")
-                        .font(.caption2)
-                        .foregroundColor(.orange)
-                }
             }
         }
         .padding(.vertical, 4)
@@ -4423,11 +1765,7 @@ struct HelpView: View {
                             .padding(.top, 4)
 
                         VStack(alignment: .leading, spacing: 4) {
-                            CodeRow(code: "/tts", description: "Toggle TTS on/off")
-                            CodeRow(code: "/tts-mute", description: "Mute/unmute audio")
-                            CodeRow(code: "/tts-say <text>", description: "Speak arbitrary text")
-                            CodeRow(code: "/tts-stop", description: "Stop speech")
-                            CodeRow(code: "/tts-status", description: "Check extension + server status")
+                            CodeRow(code: "/managerie-status", description: "Check extension + app status")
                         }
                     }
                 }
@@ -4438,10 +1776,9 @@ struct HelpView: View {
                             .font(.callout)
                             .foregroundColor(.secondary)
                         VStack(alignment: .leading, spacing: 4) {
-                            CodeRow(code: "mnote \"Hello, world!\"", description: "Enqueue speech")
-                            CodeRow(code: "mnote -v alba \"Hello\"", description: "Pick a voice")
+                            CodeRow(code: "mnote \"Build finished\"", description: "Send a notification")
                             CodeRow(code: "echo \"Hello\" | mnote", description: "Pipe input")
-                            CodeRow(code: "mnote --stop", description: "Stop playback")
+                            CodeRow(code: "mnote -S <id> \"Hi\"", description: "Attach a session id")
                         }
                     }
                 }
@@ -4452,7 +1789,7 @@ struct HelpView: View {
                             .font(.callout)
                             .foregroundColor(.secondary)
                         CodeRow(code: "~/.pi/agent/managerie/events/", description: "Drop NDJSON event files here")
-                        CodeRow(code: "{\"type\":\"speak\",\"text\":\"Hi\",\"sourceApp\":\"claude-code\",\"pid\":123}", description: "Notify (+ optional TTS)")
+                        CodeRow(code: "{\"type\":\"speak\",\"text\":\"Hi\",\"sourceApp\":\"claude-code\",\"pid\":123}", description: "Send a notification")
                         CodeRow(code: "{\"type\":\"status\",\"status\":\"working\",\"pid\":123}", description: "Live session status")
                         CodeRow(code: "{\"type\":\"stop\"}", description: "Stop and clear playback queue")
                         CodeRow(code: "~/.pi/agent/managerie/app.alive", description: "App heartbeat — mtime < 30s means running")
@@ -4520,7 +1857,7 @@ struct PermissionsView: View {
                 VStack(spacing: 12) {
                     PermissionRowView(
                         title: "Microphone",
-                        description: "Monitors mic activity to pause speech when you're talking",
+                        description: "Required for dictation — transcribed on-device",
                         status: microphoneStatus,
                         onRequest: {
                             Task {
@@ -4833,63 +2170,9 @@ struct SettingsCard<Content: View>: View {
     }
 }
 
-struct VoiceButton: View {
-    let name: String
-    let isSelected: Bool
-    let isPlaying: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                if isPlaying {
-                    Image(systemName: "speaker.wave.2.fill")
-                        .font(.caption2)
-                        .foregroundColor(.accentColor)
-                }
-                Text(name.capitalized)
-                    .font(.callout)
-                    .fontWeight(isSelected ? .semibold : .regular)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 8)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(isSelected ? Color.accentColor.opacity(0.15) : Color(NSColor.controlBackgroundColor))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(isSelected ? Color.accentColor : Color.secondary.opacity(0.2), lineWidth: isSelected ? 1.5 : 1)
-            )
-            .foregroundColor(isSelected ? .accentColor : .primary)
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-// MARK: - AVAudioPlayer Delegate
-
-/// Simple delegate that calls a completion handler when playback finishes.
-private class AudioPlayerDelegate: NSObject, AVAudioPlayerDelegate {
-    private let onFinish: () -> Void
-
-    init(onFinish: @escaping () -> Void) {
-        self.onFinish = onFinish
-    }
-
-    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        onFinish()
-    }
-
-    func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
-        onFinish()
-    }
-}
-
 // MARK: - HTTP Health Server
 
-/// Simple HTTP server that responds to /health endpoint
-/// Required by pi-tts extension which checks http://127.0.0.1:18090/health
+/// Simple HTTP server that responds to the /health endpoint.
 final class HealthHTTPServer {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "managerie.health.server")

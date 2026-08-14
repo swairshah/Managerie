@@ -104,12 +104,6 @@ codesign --force --options runtime \
     --sign "$SIGNING_IDENTITY" \
     "$APP_DIR/Contents/MacOS/mnote"
 
-if [ -f "$APP_DIR/Contents/Resources/pocket-tts-cli" ]; then
-    codesign --force --options runtime \
-        --sign "$SIGNING_IDENTITY" \
-        "$APP_DIR/Contents/Resources/pocket-tts-cli"
-fi
-
 codesign --force --deep --options runtime \
     --entitlements "$ENTITLEMENTS" \
     --sign "$SIGNING_IDENTITY" \
@@ -216,41 +210,6 @@ fi
 echo -e "${YELLOW}📦 Packaging managerie extension...${NC}"
 zip -j dist/managerie-${VERSION}.zip Extensions/managerie/index.ts Extensions/managerie/package.json Extensions/managerie/README.md 2>/dev/null || true
 
-# 11. Package optional local model asset (downloaded on demand from same release)
-MODELS_DIR="Resources/models"
-if [ ! -d "$MODELS_DIR" ] || [ ! -f "$MODELS_DIR/tts_b6369a24.safetensors" ]; then
-    if [ -d "../Loqui/Resources/models" ] && [ -f "../Loqui/Resources/models/tts_b6369a24.safetensors" ]; then
-        MODELS_DIR="../Loqui/Resources/models"
-    fi
-fi
-
-MODEL_ZIP="dist/Managerie-models-${VERSION}.zip"
-if [ -d "$MODELS_DIR" ] && [ -f "$MODELS_DIR/tts_b6369a24.safetensors" ]; then
-    echo -e "${YELLOW}📦 Packaging local model asset...${NC}"
-    STAGE_DIR=$(mktemp -d)
-    mkdir -p "$STAGE_DIR/models/embeddings"
-    cp "$MODELS_DIR/tts_b6369a24.safetensors" "$STAGE_DIR/models/" 2>/dev/null || true
-    cp "$MODELS_DIR/tokenizer.model" "$STAGE_DIR/models/" 2>/dev/null || true
-
-    if [ -d "$MODELS_DIR/embeddings" ]; then
-        cp "$MODELS_DIR/embeddings/"*.safetensors "$STAGE_DIR/models/embeddings/" 2>/dev/null || true
-    else
-        for voice_file in "$MODELS_DIR"/*.safetensors; do
-            [ -e "$voice_file" ] || continue
-            base_name="$(basename "$voice_file")"
-            if [ "$base_name" != "tts_b6369a24.safetensors" ]; then
-                cp "$voice_file" "$STAGE_DIR/models/embeddings/" 2>/dev/null || true
-            fi
-        done
-    fi
-
-    (cd "$STAGE_DIR" && zip -qr "$OLDPWD/$MODEL_ZIP" models)
-    rm -rf "$STAGE_DIR"
-    echo -e "   Created ${GREEN}$MODEL_ZIP${NC}"
-else
-    echo -e "${YELLOW}⚠ Skipping model asset: no model files found in Resources/models or ../Loqui/Resources/models${NC}"
-fi
-
 # 12. Calculate SHA for Homebrew
 echo ""
 SHA=$(shasum -a 256 "$DMG_PATH" | cut -d' ' -f1)
@@ -314,7 +273,6 @@ if command -v gh &> /dev/null; then
         if [[ ! "$GH_CONFIRM" =~ ^[Nn]$ ]]; then
             RELEASE_ASSETS=("dist/Managerie-${VERSION}.dmg")
             [ -f "dist/managerie-${VERSION}.zip" ] && RELEASE_ASSETS+=("dist/managerie-${VERSION}.zip")
-            [ -f "dist/Managerie-models-${VERSION}.zip" ] && RELEASE_ASSETS+=("dist/Managerie-models-${VERSION}.zip")
             
             gh release create "v${VERSION}" \
                 "${RELEASE_ASSETS[@]}" \

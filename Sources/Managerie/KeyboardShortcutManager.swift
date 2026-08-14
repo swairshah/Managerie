@@ -34,21 +34,16 @@ struct ShortcutBinding: Codable, Equatable {
 
 /// An action that can have a keyboard shortcut assigned.
 enum ShortcutAction: String, CaseIterable, Codable {
-    case stopSpeech = "stopSpeech"
     case toggleWindow = "toggleWindow"
 
     var displayName: String {
         switch self {
-        case .stopSpeech: return "Stop Speech"
         case .toggleWindow: return "Open Managerie"
         }
     }
 
     var defaultBinding: ShortcutBinding? {
         switch self {
-        case .stopSpeech:
-            // Cmd+. (key code 47 = period)
-            return ShortcutBinding(keyCode: 47, modifiers: UInt32(cmdKey))
         case .toggleWindow:
             // No default — user assigns their own
             return nil

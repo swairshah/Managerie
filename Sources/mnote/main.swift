@@ -1,32 +1,23 @@
 import Foundation
-import ManagerieClient
 
 /// mnote - Managerie command line interface
 ///
 /// Usage:
-///   mnote "Hello world"                    # Enqueue speech in Managerie broker
-///   mnote --voice alba "Hello"             # Use specific voice
+///   mnote "Hello world"                    # Send a notification to Managerie
 ///   echo "Hello" | mnote                   # Read from stdin
-///   mnote --list-voices                     # List available voices
-///   mnote --stop                            # Stop current/queued speech
 
 struct CLI {
     var text: String = ""
-    var voice: String? = nil  // nil = let Managerie auto-assign
-    var port: Int = 18090
-    var brokerPort: Int = 18091
-    var host: String = "127.0.0.1"
     var sessionId: String?
-    var listVoices: Bool = false
-    var stopSpeech: Bool = false
     var showHelp: Bool = false
     var quiet: Bool = false
 }
 
+/// The `speak` type name is retained for wire compatibility with already
+/// installed hooks and extensions; it means "deliver this message".
 struct BrokerRequest: Encodable {
     let type: String
     let text: String?
-    let voice: String?
     let sourceApp: String?
     let sessionId: String?
     let pid: Int32?
@@ -42,43 +33,28 @@ struct BrokerResponse: Decodable {
 
 func printUsage() {
     let usage = """
-    mnote - Managerie command line text-to-speech
+    mnote - send a notification to Managerie
 
     USAGE:
         mnote [OPTIONS] <TEXT>
         echo "text" | mnote [OPTIONS]
 
     ARGUMENTS:
-        <TEXT>    Text to speak (can also be piped via stdin)
+        <TEXT>    Message text (can also be piped via stdin)
 
     OPTIONS:
-        -v, --voice <VOICE>   Voice to use (default: auto-assigned by Managerie)
-        -p, --port <PORT>     TTS server port (default: 18090)
-        -b, --broker-port <PORT>
-                              Broker queue port (default: 18091)
-        -H, --host <HOST>     Server host (default: 127.0.0.1)
-        -S, --session-id <ID> Session identifier attached to broker requests
+        -S, --session-id <ID> Session identifier attached to the message
         -q, --quiet           Suppress status messages
-        -l, --list-voices     List available voices
-        -s, --stop            Stop current/queued speech
         -h, --help            Show this help message
 
     EXAMPLES:
-        mnote "Hello, world!"
-        mnote -v alba "Good morning"
+        mnote "Build finished"
         echo "Long text from file" | mnote
         mnote --session-id pi-session-abc123 "Hello from a specific session"
 
-    VOICES:
-        ally, dorothy, lily, alice, dave, joseph
-        george, emma, oliver, sophia, charlotte, william, jack, olivia, isla, liam
-        draco, pandora, hyperion, theia, angus
-        alba, vera, paul, charles, michael, anna, fantine, eponine, cosette, eve
-        mary, marius, javert, azelma, caro_davy, peter_yearsley, stuart_bell
-
     NOTE:
-        Requires Managerie.app to be running.
-        Default mode enqueues speech in Managerie's local broker queue for centralized playback.
+        Messages are written to Managerie's file spool, so they work even when
+        the app is closed — they're delivered on its next launch.
     """
     FileHandle.standardError.write(usage.data(using: .utf8)!)
 }
@@ -96,32 +72,6 @@ func parseArgs() -> CLI {
         case "-h", "--help":
             cli.showHelp = true
             return cli
-        case "-l", "--list-voices":
-            cli.listVoices = true
-            return cli
-        case "-s", "--stop":
-            cli.stopSpeech = true
-            return cli
-        case "-v", "--voice":
-            i += 1
-            if i < args.count {
-                cli.voice = args[i]
-            }
-        case "-p", "--port":
-            i += 1
-            if i < args.count, let port = Int(args[i]) {
-                cli.port = port
-            }
-        case "-b", "--broker-port":
-            i += 1
-            if i < args.count, let brokerPort = Int(args[i]) {
-                cli.brokerPort = brokerPort
-            }
-        case "-H", "--host":
-            i += 1
-            if i < args.count {
-                cli.host = args[i]
-            }
         case "-S", "--session-id":
             i += 1
             if i < args.count {
@@ -181,12 +131,8 @@ func sendViaSpool(request: BrokerRequest) throws {
     _ = try fm.replaceItemAt(spoolEventsDir.appendingPathComponent(name), withItemAt: tmpURL)
 }
 
-func stopViaSpool() throws {
-    try sendViaSpool(request: BrokerRequest(type: "stop", text: nil, voice: nil, sourceApp: "mnote", sessionId: nil, pid: getpid()))
-}
-
-func enqueueViaSpool(text: String, voice: String?, sessionId: String?) throws {
-    try sendViaSpool(request: BrokerRequest(type: "speak", text: text, voice: voice, sourceApp: "mnote", sessionId: sessionId, pid: getpid()))
+func enqueueViaSpool(text: String, sessionId: String?) throws {
+    try sendViaSpool(request: BrokerRequest(type: "speak", text: text, sourceApp: "mnote", sessionId: sessionId, pid: getpid()))
 }
 
 func main() async {
@@ -195,27 +141,6 @@ func main() async {
     if cli.showHelp {
         printUsage()
         exit(0)
-    }
-
-    if cli.listVoices {
-        print("Available voices:")
-        for voice in TTSClient.availableVoices {
-            print("  \(voice)")
-        }
-        exit(0)
-    }
-
-    if cli.stopSpeech {
-        do {
-            try stopViaSpool()
-            if !cli.quiet {
-                FileHandle.standardError.write("Stop request sent.\n".data(using: .utf8)!)
-            }
-            exit(0)
-        } catch {
-            FileHandle.standardError.write("Error stopping speech: \(error.localizedDescription)\n".data(using: .utf8)!)
-            exit(1)
-        }
     }
 
     // Get text from args or stdin
@@ -236,15 +161,10 @@ func main() async {
         exit(1)
     }
 
-    // Validate voice if explicitly specified
-    if let voice = cli.voice, !TTSClient.availableVoices.contains(voice) {
-        FileHandle.standardError.write("Warning: Unknown voice '\(voice)'\n".data(using: .utf8)!)
-    }
-
     // Send via spool. Works even when the app is closed — warn in that case
     // so the user knows delivery happens on next launch.
     do {
-        try enqueueViaSpool(text: text, voice: cli.voice, sessionId: cli.sessionId)
+        try enqueueViaSpool(text: text, sessionId: cli.sessionId)
         if !cli.quiet {
             if managerieAppAlive() {
                 FileHandle.standardError.write("Sent to Managerie.\n".data(using: .utf8)!)

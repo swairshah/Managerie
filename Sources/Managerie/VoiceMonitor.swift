@@ -6,8 +6,6 @@ import Darwin
 // MARK: - Voice Session Model
 
 enum VoiceActivity: Equatable {
-    case speaking
-    case queued
     case starting
     case thinking
     case reading
@@ -20,8 +18,6 @@ enum VoiceActivity: Equatable {
 
     var label: String {
         switch self {
-        case .speaking: return "Speaking"
-        case .queued: return "Queued"
         case .starting: return "Starting"
         case .thinking: return "Thinking"
         case .reading: return "Reading"
@@ -36,8 +32,6 @@ enum VoiceActivity: Equatable {
 
     var color: Color {
         switch self {
-        case .speaking: return .red
-        case .queued: return .orange
         case .starting: return .green
         case .thinking: return .orange
         case .reading: return .blue
@@ -71,7 +65,6 @@ struct VoiceSession: Identifiable, Equatable {
     var project: String?        // project/directory name from extension
     var currentText: String?
     var queuedCount: Int
-    var voice: String?
     var lastSpokenAt: Date?
     var lastSpokenText: String?
     var cwd: String?
@@ -81,7 +74,6 @@ struct VoiceSession: Identifiable, Equatable {
 
 struct VoiceSummary: Equatable {
     let total: Int
-    let speaking: Int
     let queued: Int
     let idle: Int
     let color: String
@@ -100,8 +92,8 @@ struct VoiceSummary: Equatable {
     }
 
     static let empty = VoiceSummary(
-        total: 0, speaking: 0, queued: 0, idle: 0,
-        color: "gray", label: "No voice activity"
+        total: 0, queued: 0, idle: 0,
+        color: "gray", label: "No active sessions"
     )
 }
 
@@ -122,33 +114,21 @@ final class VoiceMonitor: ObservableObject {
     private let historyStore = RequestHistoryStore.shared
     private let activeSessionWindow: TimeInterval = 5 * 60
 
-    var speakingCount: Int { sessions.filter { $0.activity == .speaking }.count }
-    var queuedCount: Int { sessions.filter { $0.activity == .queued }.count }
     var totalQueuedItems: Int { recentHistory.filter { $0.status == .queued }.count }
 
     var isMicActive: Bool = false
 
     @Published var serverEnabled: Bool = !UserDefaults.standard.bool(forKey: "serverDisabled")
 
-    @Published var speechSpeed: Double = min(2.0, max(0.7, UserDefaults.standard.object(forKey: "speechSpeed") as? Double ?? 1.0)) {
-        didSet {
-            let clamped = min(2.0, max(0.7, speechSpeed))
-            if clamped != speechSpeed { speechSpeed = clamped }
-            else { UserDefaults.standard.set(speechSpeed, forKey: "speechSpeed") }
-        }
-    }
 
     func handleServerToggle(enabled: Bool) {
         UserDefaults.standard.set(!enabled, forKey: "serverDisabled")
         guard let appDelegate = AppDelegate.shared else { return }
         if enabled {
-            appDelegate.speechCoordinator?.isMuted = false
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 appDelegate.startLocalBroker()
             }
         } else {
-            appDelegate.speechCoordinator?.stopAll()
-            appDelegate.speechCoordinator?.isMuted = true
             appDelegate.stopLocalBroker()
         }
     }
@@ -294,10 +274,9 @@ final class VoiceMonitor: ObservableObject {
 
     // MARK: - Actions
 
-    func stopAll() {
-        AppDelegate.shared?.stopCurrentSpeech()
+    func clearPending() {
         RequestHistoryStore.shared.cancelAllPending()
-        lastMessage = "Stopped all speech"
+        lastMessage = "Cleared pending messages"
     }
 
     func jump(to session: VoiceSession) {
@@ -356,7 +335,6 @@ final class VoiceMonitor: ObservableObject {
                 project: agent.project ?? cwdName,
                 currentText: nil,
                 queuedCount: 0,
-                voice: nil,
                 lastSpokenAt: nil,
                 lastSpokenText: nil,
                 cwd: agent.cwd,
@@ -364,35 +342,11 @@ final class VoiceMonitor: ObservableObject {
                 mux: nil
             )
 
-            // Overlay voice history
+            // Overlay the most recent message from this session.
             let pidEntries = entries.filter { $0.pid == agent.pid }
-            if !pidEntries.isEmpty {
-                let recentCutoff = Date().addingTimeInterval(-120)
-                let playingEntry = pidEntries.first { $0.status == .playing && $0.timestamp > recentCutoff }
-                let queuedEntries = pidEntries.filter { $0.status == .queued && $0.timestamp > recentCutoff }
-                let playedEntries = pidEntries.filter { $0.status == .played }
-
-                // Keep live agent status as the primary activity signal.
-                // Only fall back to speech-based activity when agent reports idle/waiting.
-                if let playing = playingEntry {
-                    if session.activity == .idle || session.activity == .waiting {
-                        session.activity = .speaking
-                    }
-                    session.currentText = playing.text
-                    session.queuedCount = queuedEntries.count
-                } else if !queuedEntries.isEmpty {
-                    if session.activity == .idle || session.activity == .waiting {
-                        session.activity = .queued
-                    }
-                    session.currentText = queuedEntries.first?.text
-                    session.queuedCount = queuedEntries.count
-                }
-
-                if let lastPlayed = playedEntries.max(by: { $0.timestamp < $1.timestamp }) {
-                    session.lastSpokenAt = lastPlayed.timestamp
-                    session.lastSpokenText = lastPlayed.text
-                }
-                session.voice = pidEntries.compactMap { $0.voice }.first
+            if let latest = pidEntries.max(by: { $0.timestamp < $1.timestamp }) {
+                session.lastSpokenAt = latest.timestamp
+                session.lastSpokenText = latest.text
             }
 
             sessions.append(session)
@@ -400,7 +354,7 @@ final class VoiceMonitor: ObservableObject {
 
         // Also show sessions with recent speech activity (even without live status events)
         let recentCutoff = Date().addingTimeInterval(-activeSessionWindow)
-        var voiceBuckets: [Int: [RequestHistoryEntry]] = [:]  // keyed by pid
+        var messageBuckets: [Int: [RequestHistoryEntry]] = [:]  // keyed by pid
         for entry in entries {
             guard let pid = entry.pid, !seenPids.contains(pid) else { continue }
             guard entry.timestamp > recentCutoff else { continue }
@@ -408,30 +362,20 @@ final class VoiceMonitor: ObservableObject {
             // Keep active queue activity visible even if the originating pid has already exited.
             // This can happen when external clients enqueue speech from short-lived processes.
             if !Self.isPidAlive(pid) && !entry.status.isInQueue { continue }
-            voiceBuckets[pid, default: []].append(entry)
+            messageBuckets[pid, default: []].append(entry)
         }
 
-        for (pid, pidEntries) in voiceBuckets {
+        for (pid, pidEntries) in messageBuckets {
             let key = "pid-\(pid)"
             guard !sessions.contains(where: { $0.id == key }) else { continue }
 
             let pidAlive = Self.isPidAlive(pid)
-            let playingEntry = pidEntries.first { $0.status == .playing }
-            let queuedEntries = pidEntries.filter { $0.status == .queued }
-            let playedEntries = pidEntries.filter { $0.status == .played }
+            let latest = pidEntries.max(by: { $0.timestamp < $1.timestamp })
 
-            var activity: VoiceActivity = .waiting
-            var currentText: String? = nil
-
-            if playingEntry != nil {
-                activity = .speaking
-                currentText = playingEntry?.text
-            } else if !queuedEntries.isEmpty {
-                activity = .queued
-                currentText = queuedEntries.first?.text
-            } else if !pidAlive {
-                continue
-            }
+            // Without live status events, a session is simply waiting.
+            let activity: VoiceActivity = .waiting
+            let currentText: String? = nil
+            guard pidAlive else { continue }
 
             // Get project name from process cwd only when pid is still alive.
             let cwd = pidAlive ? Self.cwdForPid(pid) : nil
@@ -446,10 +390,9 @@ final class VoiceMonitor: ObservableObject {
                 statusDetail: nil,
                 project: projectName,
                 currentText: currentText,
-                queuedCount: queuedEntries.count,
-                voice: pidEntries.compactMap { $0.voice }.first,
-                lastSpokenAt: playedEntries.max(by: { $0.timestamp < $1.timestamp })?.timestamp,
-                lastSpokenText: playedEntries.max(by: { $0.timestamp < $1.timestamp })?.text,
+                queuedCount: 0,
+                lastSpokenAt: latest?.timestamp,
+                lastSpokenText: latest?.text,
                 cwd: cwd,
                 tty: nil,
                 mux: nil
@@ -477,22 +420,11 @@ final class VoiceMonitor: ObservableObject {
                 Self.appSessionKey(sourceApp: $0.sourceApp, sessionId: $0.sessionId) == bucketKey
             }) else { continue }
 
-            let playingEntry = bucketEntries.first { $0.status == .playing }
-            let queuedEntries = bucketEntries.filter { $0.status == .queued }
-            let playedEntries = bucketEntries.filter { $0.status == .played }
+            let latest = bucketEntries.max(by: { $0.timestamp < $1.timestamp })
+            guard latest != nil else { continue }
 
-            var activity: VoiceActivity = .waiting
-            var currentText: String? = nil
-
-            if playingEntry != nil {
-                activity = .speaking
-                currentText = playingEntry?.text
-            } else if !queuedEntries.isEmpty {
-                activity = .queued
-                currentText = queuedEntries.first?.text
-            } else if playedEntries.isEmpty {
-                continue
-            }
+            let activity: VoiceActivity = .waiting
+            let currentText: String? = nil
 
             sessions.append(VoiceSession(
                 id: "history-\(bucketKey)",
@@ -503,10 +435,9 @@ final class VoiceMonitor: ObservableObject {
                 statusDetail: nil,
                 project: nil,
                 currentText: currentText,
-                queuedCount: queuedEntries.count,
-                voice: bucketEntries.compactMap { $0.voice }.first,
-                lastSpokenAt: playedEntries.max(by: { $0.timestamp < $1.timestamp })?.timestamp,
-                lastSpokenText: playedEntries.max(by: { $0.timestamp < $1.timestamp })?.text,
+                queuedCount: 0,
+                lastSpokenAt: latest?.timestamp,
+                lastSpokenText: latest?.text,
                 cwd: nil,
                 tty: nil,
                 mux: nil
@@ -527,7 +458,6 @@ final class VoiceMonitor: ObservableObject {
                 project: project,
                 currentText: nil,
                 queuedCount: 0,
-                voice: nil,
                 lastSpokenAt: nil,
                 lastSpokenText: nil,
                 cwd: cwd,
@@ -537,8 +467,8 @@ final class VoiceMonitor: ObservableObject {
             seenPids.insert(pid)
         }
 
-        // Sort: speaking > active work states > queued > waiting > idle, then by recency
-        let order: [VoiceActivity] = [.speaking, .starting, .thinking, .reading, .editing, .running, .searching, .error, .queued, .waiting, .idle]
+        // Sort: active work states > waiting > idle, then by recency
+        let order: [VoiceActivity] = [.starting, .thinking, .reading, .editing, .running, .searching, .error, .waiting, .idle]
         return sessions.sorted { lhs, rhs in
             let li = order.firstIndex(of: lhs.activity) ?? 99
             let ri = order.firstIndex(of: rhs.activity) ?? 99
@@ -552,12 +482,10 @@ final class VoiceMonitor: ObservableObject {
 
     private static func buildSummary(from sessions: [VoiceSession]) -> VoiceSummary {
         let total = sessions.count
-        let speaking = sessions.filter { $0.activity == .speaking }.count
         let workingSessions = sessions.filter { $0.activity.isWorkStatus }
         let working = workingSessions.count
-        let queued = sessions.filter { $0.activity == .queued }.count
         let waiting = sessions.filter { $0.activity == .waiting }.count
-        let idle = total - speaking - working - queued - waiting
+        let idle = total - working - waiting
 
         let color: String
         let label: String
@@ -565,9 +493,6 @@ final class VoiceMonitor: ObservableObject {
         if total == 0 {
             color = "default"
             label = "No agents"
-        } else if speaking > 0 {
-            color = "red"
-            label = speaking == 1 ? "Speaking" : "\(speaking) speaking"
         } else if working > 0 {
             let precedence: [VoiceActivity] = [.starting, .thinking, .reading, .editing, .running, .searching, .error]
             let primary = precedence.first { activity in sessions.contains(where: { $0.activity == activity }) } ?? .running
@@ -585,9 +510,6 @@ final class VoiceMonitor: ObservableObject {
             label = working == 1
                 ? primary.label
                 : (primaryCount == working ? "\(primaryCount) \(primary.label.lowercased())" : "\(working) active")
-        } else if queued > 0 {
-            color = "orange"
-            label = queued == 1 ? "Queued" : "\(queued) queued"
         } else if waiting > 0 {
             color = "green"
             label = waiting == 1 ? "Waiting" : "\(waiting) waiting"
@@ -596,20 +518,12 @@ final class VoiceMonitor: ObservableObject {
             label = "Idle"
         }
 
-        return VoiceSummary(total: total, speaking: speaking, queued: queued, idle: idle, color: color, label: label)
+        return VoiceSummary(total: total, queued: 0, idle: idle, color: color, label: label)
     }
 
+    /// The app itself is the service now — no external synth backend to probe.
     private func checkServerHealth() {
-        switch SpeechPlaybackCoordinator.currentProvider {
-        case .elevenlabs:
-            serverOnline = ElevenLabsApiKeyManager.resolvedKey() != nil
-        case .google:
-            serverOnline = GoogleApiKeyManager.resolvedKey() != nil
-        case .deepgram:
-            serverOnline = DeepgramApiKeyManager.resolvedKey() != nil
-        case .local:
-            serverOnline = LocalTTSRuntime.shared.isRuntimeAvailable() && LocalTTSRuntime.shared.isModelInstalled()
-        }
+        serverOnline = !UserDefaults.standard.bool(forKey: "serverDisabled")
     }
 
     /// Discover active pi sessions from extension-owned inbox directories.

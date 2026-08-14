@@ -26,7 +26,7 @@ All frames use:
 Notes:
 
 - `requestId` required for `cmd`; echoed in `ack`/`error`.
-- `seq` is present on replayable state events (`sessions.updated`, `playback.state`, `history.appended`, `stream.reset`).
+- `seq` is present on replayable state events (`sessions.updated`, `history.appended`, `stream.reset`).
 - `idempotencyKey` required for mutating commands.
 
 ## Handshake
@@ -87,7 +87,7 @@ Notes:
 
 ## `sessions.snapshot.get`
 
-Returns current active sessions + summary + playback state.
+Returns current active sessions + summary.
 
 ## `session.sendText`
 
@@ -128,12 +128,15 @@ Behavior:
 
 ## `tts.speak`
 
+Delivers a message: recorded in history and raised as a macOS notification.
+Named `tts.speak` for backward compatibility — text-to-speech has been removed.
+A `voice` field sent by older clients is accepted and ignored.
+
 Payload:
 
 ```json
 {
   "text": "hello from iphone",
-  "voice": "auto",
   "sourceApp": "managerie-ios",
   "sessionId": "phone"
 }
@@ -141,33 +144,13 @@ Payload:
 
 ## `tts.stop`
 
-Payload:
+Accepted and acked, but a no-op — retained so older clients don't error.
 
 ```json
 {
   "scope": "global"
 }
 ```
-
-(v1 global stop; session-scoped stop can be added later)
-
-## `audio.setStream`
-
-Controls remote audio chunk fan-out for this websocket client.
-
-Payload:
-
-```json
-{
-  "enabled": true
-}
-```
-
-Behavior:
-
-- Default is `enabled=false` on every new connection.
-- When `enabled=false`, the server does **not** send audio chunks to that client.
-- When toggled back to `enabled=true`, streaming resumes from the **next live chunk** (no backlog replay).
 
 ## Events
 
@@ -181,57 +164,17 @@ Payload:
 {
   "summary": {
     "total": 3,
-    "speaking": 1,
-    "queued": 1,
+    "queued": 0,
     "idle": 1,
-    "label": "1 speaking"
+    "label": "2 running"
   },
   "sessions": []
 }
 ```
 
-## `playback.state`
-
-Emitted when queue/playing state changes.
-
 ## `history.appended`
 
 Emitted when a new history entry is recorded.
-
-## `audio.start` / `audio.chunk` / `audio.end`
-
-Live audio mirror events for clients that enabled `audio.setStream`.
-
-`audio.start` payload:
-
-```json
-{
-  "streamId": "...",
-  "sourceApp": "pi",
-  "sessionId": "...",
-  "pid": 12345,
-  "voice": "ally",
-  "mimeType": "audio/mpeg"
-}
-```
-
-`audio.chunk` payload:
-
-```json
-{
-  "streamId": "...",
-  "chunk": "<base64-mp3-bytes>"
-}
-```
-
-`audio.end` payload:
-
-```json
-{
-  "streamId": "...",
-  "status": "completed|interrupted|failed"
-}
-```
 
 ## `chat.delta` / `chat.final` (optional in v1)
 
