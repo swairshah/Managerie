@@ -4600,7 +4600,7 @@ struct AboutView: View {
                     AboutCard(title: "Connect your agents", icon: "puzzlepiece.extension") {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("One click per agent in **Integrations** — it installs the pi extension, claude-code hooks, and codex notify for you. Agents talk to the app through a file spool: no ports, no servers.")
-                            CodeRow(code: "brew install --cask managerie", description: "Install / update")
+                            CodeRow(code: "brew install --cask swairshah/tap/managerie", description: "Install / update")
                         }
                     }
 

@@ -17,7 +17,7 @@ For the iPhone companion app docs, see:
 
 ```bash
 brew tap swairshah/tap
-brew install --cask managerie
+brew install --cask swairshah/tap/managerie
 ```
 
 Then launch Managerie from Applications (or via Spotlight) and start sending broker requests.

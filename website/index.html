@@ -16,8 +16,8 @@
 <style>
   :root {
     color-scheme: light only;
-    --cream: #F2E8CE;
-    --cream-deep: #EADDBb;
+    --cream: #F6F1E4;
+    --cream-deep: #EDE6D2;
     --ink: #3D2314;
     --rust: #C0492F;
     --amber: #D4A017;
@@ -36,7 +36,7 @@
     font-optical-sizing: auto;
     line-height: 1.55;
     /* subtle halftone paper */
-    background-image: radial-gradient(rgba(61,35,20,0.055) 1px, transparent 1.4px);
+    background-image: radial-gradient(rgba(61,35,20,0.045) 1px, transparent 1.4px);
     background-size: 18px 18px;
   }
 
@@ -213,8 +213,8 @@
   </div>
 
   <div>
-    <button class="install-box" onclick="navigator.clipboard.writeText('brew install --cask managerie').then(()=>{document.getElementById('hint').textContent='copied! now go run it →'})">
-      <span class="dollar">$</span> brew install --cask managerie
+    <button class="install-box" onclick="navigator.clipboard.writeText('brew install --cask swairshah/tap/managerie').then(()=>{document.getElementById('hint').textContent='copied! now go run it →'})">
+      <span class="dollar">$</span> brew install --cask swairshah/tap/managerie
     </button>
     <span class="copy-hint" id="hint">click to copy</span>
   </div>
@@ -285,7 +285,7 @@
         <div class="step-num"></div>
         <div>
           <h3>Install with Homebrew</h3>
-          <p><code>brew install --cask managerie</code> — signed &amp; notarized. Launch it and allow notifications when asked.</p>
+          <p><code>brew install --cask swairshah/tap/managerie</code> — signed &amp; notarized. Launch it and allow notifications when asked.</p>
         </div>
       </div>
       <div class="step">

@@ -144,5 +144,5 @@ The fallback path masks the bug on the build machine — the app works fine loca
 
 ```bash
 brew tap swairshah/tap
-brew install --cask managerie
+brew install --cask swairshah/tap/managerie
 ```
