@@ -1,28 +1,27 @@
 {
   "name": "@swairshah/managerie",
-  "version": "1.2.2",
-  "description": "Text-to-speech extension for Pi coding agent using Loqui",
+  "version": "1.0.0",
+  "description": "Managerie connector extension for the pi coding agent — notifications, live session status, and reply injection for the Managerie menubar app",
   "main": "index.ts",
   "type": "module",
   "keywords": [
     "pi-package",
     "pi",
     "pi-extension",
-    "tts",
-    "text-to-speech",
-    "loqui",
-    "voice"
+    "managerie",
+    "notifications",
+    "agents"
   ],
   "author": "Swair Shah",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/swairshah/Loqui.git",
+    "url": "git+https://github.com/swairshah/Managerie.git",
     "directory": "Extensions/managerie"
   },
-  "homepage": "https://github.com/swairshah/Loqui#readme",
+  "homepage": "https://github.com/swairshah/Managerie#readme",
   "bugs": {
-    "url": "https://github.com/swairshah/Loqui/issues"
+    "url": "https://github.com/swairshah/Managerie/issues"
   },
   "scripts": {
     "pack:preview": "npm pack --dry-run",
