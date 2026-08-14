@@ -512,3 +512,44 @@ final class StableOrderingTests: XCTestCase {
         XCTAssertEqual(result.map(\.id), ["a", "b", "c"])
     }
 }
+
+// MARK: - Syscall-based process inspection (replaced ps/lsof subprocesses,
+// which pumped the main run loop via waitUntilExit → AttributeGraph crash)
+
+final class ProcessSyscallTests: XCTestCase {
+
+    func testParseProcArgs2Layout() {
+        // argc=2 | exec_path\0 | padding | "pi\0" "--serve\0"
+        var buf: [UInt8] = []
+        withUnsafeBytes(of: Int32(2)) { buf.append(contentsOf: $0) }
+        buf.append(contentsOf: Array("/usr/local/bin/pi".utf8)); buf.append(0)
+        buf.append(contentsOf: [0, 0, 0])  // padding
+        buf.append(contentsOf: Array("pi".utf8)); buf.append(0)
+        buf.append(contentsOf: Array("--serve".utf8)); buf.append(0)
+        XCTAssertEqual(VoiceMonitor.parseProcArgs2(buffer: buf, size: buf.count), "pi --serve")
+    }
+
+    func testParseProcArgs2EmptyIsNil() {
+        var buf: [UInt8] = []
+        withUnsafeBytes(of: Int32(0)) { buf.append(contentsOf: $0) }
+        XCTAssertNil(VoiceMonitor.parseProcArgs2(buffer: buf, size: buf.count))
+    }
+
+    func testCommandLineForOwnProcess() {
+        let cmd = VoiceMonitor.commandLineViaSysctl(Int(getpid()))
+        XCTAssertNotNil(cmd)
+        XCTAssertTrue(cmd?.lowercased().contains("xctest") == true || cmd?.contains("Managerie") == true,
+                      "unexpected command: \(cmd ?? "nil")")
+    }
+
+    func testCwdForOwnProcess() {
+        let cwd = VoiceMonitor.cwdViaProcPidInfo(Int(getpid()))
+        XCTAssertNotNil(cwd)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cwd ?? "/nonexistent"))
+    }
+
+    func testNonexistentPidReturnsNil() {
+        XCTAssertNil(VoiceMonitor.cwdViaProcPidInfo(999_999_99))
+        XCTAssertNil(VoiceMonitor.commandLineViaSysctl(999_999_99))
+    }
+}

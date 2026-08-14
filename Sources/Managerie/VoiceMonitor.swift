@@ -687,31 +687,57 @@ final class VoiceMonitor: ObservableObject {
         }
         commandCacheLock.unlock()
 
-        let pipe = Pipe()
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-p", "\(pid)", "-o", "command="]
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let command = String(data: data, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if let command, !command.isEmpty {
-                commandCacheLock.lock()
-                commandCache[pid] = (command: command, updatedAt: now)
-                commandCacheLock.unlock()
-                return command
-            }
-        } catch {}
+        // Syscall, not `ps` + waitUntilExit: rebuild runs on the main thread,
+        // and NSTask.waitUntilExit pumps the run loop — a display-link tick
+        // re-enters SwiftUI mid-update and AttributeGraph aborts (SIGABRT).
+        if let command = Self.commandLineViaSysctl(pid), !command.isEmpty {
+            commandCacheLock.lock()
+            commandCache[pid] = (command: command, updatedAt: now)
+            commandCacheLock.unlock()
+            return command
+        }
 
         commandCacheLock.lock()
         commandCache.removeValue(forKey: pid)
         commandCacheLock.unlock()
         return nil
+    }
+
+    /// Full command line via sysctl KERN_PROCARGS2 (what `ps` itself reads).
+    /// Works for same-uid processes; returns nil otherwise.
+    nonisolated static func commandLineViaSysctl(_ pid: Int) -> String? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, Int32(pid)]
+        var size = 0
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return nil }
+        var buffer = [UInt8](repeating: 0, count: size)
+        guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return nil }
+        return parseProcArgs2(buffer: buffer, size: size)
+    }
+
+    /// KERN_PROCARGS2 layout: argc (Int32) | exec_path\0 | \0 padding | argv[0]\0 argv[1]\0 …
+    nonisolated static func parseProcArgs2(buffer: [UInt8], size: Int) -> String? {
+        let argc = Int(buffer.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) })
+        guard argc > 0 else { return nil }
+        var idx = MemoryLayout<Int32>.size
+        // Skip exec path
+        while idx < size, buffer[idx] != 0 { idx += 1 }
+        // Skip NUL padding
+        while idx < size, buffer[idx] == 0 { idx += 1 }
+
+        var args: [String] = []
+        var current: [UInt8] = []
+        var idxArg = idx
+        while idxArg < size, args.count < argc {
+            if buffer[idxArg] == 0 {
+                args.append(String(decoding: current, as: UTF8.self))
+                current.removeAll(keepingCapacity: true)
+            } else {
+                current.append(buffer[idxArg])
+            }
+            idxArg += 1
+        }
+        let joined = args.joined(separator: " ").trimmingCharacters(in: .whitespaces)
+        return joined.isEmpty ? nil : joined
     }
 
     private static func sourceAppForPid(_ pid: Int) -> String {
@@ -729,6 +755,19 @@ final class VoiceMonitor: ObservableObject {
     private static var cwdCache: [Int: (path: String, updatedAt: Date)] = [:]
     private static let cwdCacheTTL: TimeInterval = 10
 
+    /// Current working directory via proc_pidinfo(PROC_PIDVNODEPATHINFO).
+    nonisolated static func cwdViaProcPidInfo(_ pid: Int) -> String? {
+        var info = proc_vnodepathinfo()
+        let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
+        let result = proc_pidinfo(Int32(pid), PROC_PIDVNODEPATHINFO, 0, &info, size)
+        guard result > 0 else { return nil }
+        let path = withUnsafeBytes(of: &info.pvi_cdir.vip_path) { raw -> String in
+            guard let base = raw.bindMemory(to: CChar.self).baseAddress else { return "" }
+            return String(cString: base)
+        }
+        return path.isEmpty ? nil : path
+    }
+
     /// Best-effort cwd lookup for pid (used when extension status events are unavailable).
     private static func cwdForPid(_ pid: Int) -> String? {
         let now = Date()
@@ -739,26 +778,14 @@ final class VoiceMonitor: ObservableObject {
         }
         cwdCacheLock.unlock()
 
-        let pipe = Pipe()
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-        process.arguments = ["-a", "-p", "\(pid)", "-d", "cwd", "-Fn"]
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
-            for line in output.split(separator: "\n") where line.hasPrefix("n/") {
-                let path = String(line.dropFirst())
-                cwdCacheLock.lock()
-                cwdCache[pid] = (path: path, updatedAt: now)
-                cwdCacheLock.unlock()
-                return path
-            }
-        } catch {}
+        // Syscall, not `lsof` + waitUntilExit — same main-thread run-loop
+        // re-entrancy hazard as commandForPid, and ~1000x faster.
+        if let path = Self.cwdViaProcPidInfo(pid) {
+            cwdCacheLock.lock()
+            cwdCache[pid] = (path: path, updatedAt: now)
+            cwdCacheLock.unlock()
+            return path
+        }
 
         cwdCacheLock.lock()
         cwdCache.removeValue(forKey: pid)
