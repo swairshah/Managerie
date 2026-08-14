@@ -30,15 +30,18 @@ final class SendHandler {
             return SendResult(success: false, message: "No PID")
         }
 
-        let app = (sourceApp ?? "pi").lowercased()
-
         // Non-pi agents (claude-code, codex, …) have no inbox watcher —
         // deliver via tmux send-keys instead.
-        if app != "pi" {
-            return sendViaTmux(pid: pid, tty: tty, text: text, sourceApp: app)
+        if !usesInboxRoute(sourceApp: sourceApp) {
+            return sendViaTmux(pid: pid, tty: tty, text: text, sourceApp: (sourceApp ?? "?").lowercased())
         }
 
         return sendViaInbox(pid: pid, text: text)
+    }
+
+    /// pi sessions have an extension-side inbox watcher; everything else needs tmux.
+    static func usesInboxRoute(sourceApp: String?) -> Bool {
+        (sourceApp ?? "pi").trimmingCharacters(in: .whitespaces).lowercased() == "pi"
     }
 
     // MARK: - Pi inbox route
@@ -120,7 +123,7 @@ final class SendHandler {
     }
 
     /// "ttys012", "/dev/ttys012" → "/dev/ttys012"; "??" → nil
-    private static func normalizedTty(_ tty: String?) -> String? {
+    static func normalizedTty(_ tty: String?) -> String? {
         guard var tty = tty?.trimmingCharacters(in: .whitespacesAndNewlines),
               !tty.isEmpty, tty != "??" else { return nil }
         if !tty.hasPrefix("/dev/") { tty = "/dev/" + tty }
@@ -146,11 +149,17 @@ final class SendHandler {
     }
 
     private static func tmuxTarget(forTty ttyPath: String, tmux: String) -> String? {
-        guard let out = runProcess(tmux, ["list-panes", "-a", "-F", "#{session_name}:#{window_index}.#{pane_index} #{pane_tty}"]) else {
+        guard let out = runProcess(tmux, ["list-panes", "-a", "-F", "#{session_name}:#{window_index}.#{pane_index}\t#{pane_tty}"]) else {
             return nil
         }
-        for line in out.components(separatedBy: "\n") {
-            let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
+        return parseTmuxPaneTarget(out, ttyPath: ttyPath)
+    }
+
+    /// Parse tab-separated `list-panes -F "#{target}\t#{pane_tty}"` output.
+    /// Tab-delimited so session names containing spaces survive.
+    static func parseTmuxPaneTarget(_ output: String, ttyPath: String) -> String? {
+        for line in output.components(separatedBy: "\n") {
+            let parts = line.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
             guard parts.count == 2 else { continue }
             if parts[1] == ttyPath {
                 return parts[0]

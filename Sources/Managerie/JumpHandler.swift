@@ -62,7 +62,7 @@ final class JumpHandler {
         let cwd: String
     }
 
-    private struct HerdrAgentListResponse: Decodable {
+    struct HerdrAgentListResponse: Decodable {
         struct Result: Decodable {
             let agents: [Agent]
         }
@@ -74,7 +74,7 @@ final class JumpHandler {
         let result: Result
     }
 
-    private struct HerdrProcessInfoResponse: Decodable {
+    struct HerdrProcessInfoResponse: Decodable {
         struct Result: Decodable {
             let processInfo: ProcessInfo
         }
@@ -172,11 +172,11 @@ final class JumpHandler {
         }
         
         // Detect mux (tmux/zellij)
-        let muxInfo = detectMux(pid: Int32(pid), byPid: byPid)
+        let muxInfo = Self.detectMux(pid: Int32(pid), byPid: byPid)
         NSLog("JumpHandler: %@", "mux = \(muxInfo?.type ?? "nil"), session = \(muxInfo?.session ?? "nil")")
         
         // Detect terminal app from process ancestry
-        var (terminalApp, _) = detectTerminalApp(pid: Int32(pid), byPid: byPid)
+        var (terminalApp, _) = Self.detectTerminalApp(pid: Int32(pid), byPid: byPid)
         NSLog("JumpHandler: %@", "terminalApp = \(terminalApp ?? "nil")")
         
         // Build focus hints
@@ -209,11 +209,11 @@ final class JumpHandler {
         NSLog("JumpHandler: focus hints = %@", hints as NSArray)
         
         // Find mux client PID (the tmux/zellij client attached to the session)
-        let clientPid = findMuxClientPid(mux: muxInfo, tty: tty, processes: processes)
+        let clientPid = Self.findMuxClientPid(mux: muxInfo, tty: tty, processes: processes)
         
         // If we have a client PID, detect terminal from that
         if let clientPid = clientPid {
-            let (clientTerminal, _) = detectTerminalApp(pid: clientPid, byPid: byPid)
+            let (clientTerminal, _) = Self.detectTerminalApp(pid: clientPid, byPid: byPid)
             if let t = clientTerminal {
                 terminalApp = t
             }
@@ -292,9 +292,7 @@ final class JumpHandler {
                 continue
             }
 
-            let processInfo = info.result.processInfo
-            if processInfo.shellPid == pid ||
-                processInfo.foregroundProcesses?.contains(where: { $0.pid == pid }) == true {
+            if Self.herdrPaneMatches(info.result.processInfo, pid: pid) {
                 targetPaneId = agent.paneId
                 break
             }
@@ -323,6 +321,12 @@ final class JumpHandler {
                 ? "Focused Herdr pane \(targetPaneId)"
                 : "Selected Herdr pane \(targetPaneId), but could not focus its terminal"
         )
+    }
+
+    /// Pure matcher: does a Herdr pane's process info own the given agent pid?
+    static func herdrPaneMatches(_ info: HerdrProcessInfoResponse.ProcessInfo, pid: Int) -> Bool {
+        if info.shellPid == pid { return true }
+        return info.foregroundProcesses?.contains(where: { $0.pid == pid }) == true
     }
 
     private func focusHerdrClientTerminal() -> Bool {
@@ -634,6 +638,11 @@ final class JumpHandler {
         
         guard let output = String(data: data, encoding: .utf8) else { return [] }
         
+        return Self.parseProcessList(output)
+    }
+
+    /// Parse `ps -axo pid=,ppid=,comm=,tty=,args=` output into ProcessInfo records.
+    static func parseProcessList(_ output: String) -> [ProcessInfo] {
         var processes: [ProcessInfo] = []
         for line in output.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -687,7 +696,7 @@ final class JumpHandler {
     
     // MARK: - Mux Detection
     
-    private func detectMux(pid: Int32, byPid: [Int: ProcessInfo]) -> MuxInfo? {
+    static func detectMux(pid: Int32, byPid: [Int: ProcessInfo]) -> MuxInfo? {
         var seen = Set<Int32>()
         var current: Int32? = pid
         
@@ -715,7 +724,7 @@ final class JumpHandler {
         return nil
     }
     
-    private func extractZellijSession(args: String) -> String? {
+    static func extractZellijSession(args: String) -> String? {
         // Look for "attach <session>" pattern
         if let range = args.range(of: "attach\\s+(\\S+)", options: .regularExpression) {
             let match = args[range]
@@ -741,7 +750,7 @@ final class JumpHandler {
         return nil
     }
     
-    private func extractTmuxSession(args: String) -> String? {
+    static func extractTmuxSession(args: String) -> String? {
         // Look for "-t <session>" or "attach -t <session>" pattern
         if let range = args.range(of: "-t\\s+(\\S+)", options: .regularExpression) {
             let match = args[range]
@@ -759,7 +768,7 @@ final class JumpHandler {
         
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        task.arguments = ["tmux", "list-panes", "-a", "-F", "#{pane_tty} #{session_name} #{window_name}"]
+        task.arguments = ["tmux", "list-panes", "-a", "-F", "#{pane_tty}\t#{session_name}\t#{window_name}"]
         
         let pipe = Pipe()
         task.standardOutput = pipe
@@ -776,22 +785,25 @@ final class JumpHandler {
         
         guard let output = String(data: data, encoding: .utf8) else { return nil }
         
+        return Self.parseTmuxInfo(output: output, ttyPath: ttyPath)
+    }
+
+    /// Parse tab-separated `list-panes -F "#{pane_tty}\t#{session_name}\t#{window_name}"`
+    /// output. Tab-delimited so session/window names containing spaces survive.
+    static func parseTmuxInfo(output: String, ttyPath: String) -> (session: String, windowName: String)? {
         for line in output.components(separatedBy: "\n") {
-            let parts = line.split(separator: " ", maxSplits: 2)
+            let parts = line.split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
             guard parts.count >= 3 else { continue }
             
-            let paneTTY = String(parts[0])
-            if paneTTY == ttyPath {
-                let session = String(parts[1])
-                let windowName = String(parts[2])
-                return (session, windowName)
+            if String(parts[0]) == ttyPath {
+                return (String(parts[1]), String(parts[2]))
             }
         }
         
         return nil
     }
     
-    private func findMuxClientPid(mux: MuxInfo?, tty: String, processes: [ProcessInfo]) -> Int32? {
+    static func findMuxClientPid(mux: MuxInfo?, tty: String, processes: [ProcessInfo]) -> Int32? {
         guard let mux = mux else { return nil }
         
         if mux.type == "tmux" {
@@ -806,7 +818,7 @@ final class JumpHandler {
         return nil
     }
     
-    private func detectTerminalApp(pid: Int32, byPid: [Int: ProcessInfo]) -> (String?, Int32?) {
+    static func detectTerminalApp(pid: Int32, byPid: [Int: ProcessInfo]) -> (String?, Int32?) {
         var seen = Set<Int32>()
         var current: Int32? = pid
         
