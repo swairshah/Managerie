@@ -135,10 +135,40 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Pending dock-reopen window open, deferred so a notification tap can
+    /// cancel it (see below).
+    private var pendingReopen: DispatchWorkItem?
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        // When dock icon is clicked, open settings
-        openSettings()
+        // Tapping a notification also activates the app, and AppKit may send
+        // this *before* the notification delegate runs — so we can't just
+        // check a flag. Instead the window open is deferred briefly; a
+        // notification interaction cancels it. A real dock click has no
+        // notification response, so it opens after the short delay.
+        if AgentNotificationManager.shouldSuppressReopen {
+            debugLog("Managerie: reopen suppressed (notification activation)")
+            return true
+        }
+
+        pendingReopen?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            guard !AgentNotificationManager.shouldSuppressReopen else {
+                debugLog("Managerie: reopen suppressed (notification activation)")
+                return
+            }
+            self.openSettings()
+        }
+        pendingReopen = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: work)
         return true
+    }
+
+    /// Called when a notification is tapped/actioned so a queued dock-reopen
+    /// never turns into a surprise window.
+    func cancelPendingReopen() {
+        pendingReopen?.cancel()
+        pendingReopen = nil
     }
 
     func updateDockIconVisibility() {

@@ -559,17 +559,25 @@ private struct MenuWindowTopPin: NSViewRepresentable {
             coordinator.topY = window.frame.maxY
         }
 
-        // Content-driven resizes keep the top edge fixed.
+        // Content-driven resizes keep the top edge fixed. The move is deferred
+        // to the next runloop turn: repositioning the window *during* its own
+        // resize notification reenters AppKit's layout pass and leaves the
+        // hosting view centred inside an oversized panel (the giant blank
+        // margins bug). Only the origin is touched — never the size, so SwiftUI
+        // keeps full control of the panel's height.
         coordinator.resizeObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didResizeNotification, object: window, queue: .main
         ) { _ in
-            guard let window = coordinator.window, let topY = coordinator.topY else { return }
-            var frame = window.frame
-            guard abs(frame.maxY - topY) > 0.5 else { return }
-            frame.origin.y = topY - frame.height
+            guard !coordinator.isAdjusting else { return }
             coordinator.isAdjusting = true
-            window.setFrame(frame, display: true)
-            coordinator.isAdjusting = false
+            DispatchQueue.main.async {
+                defer { coordinator.isAdjusting = false }
+                guard let window = coordinator.window, let topY = coordinator.topY else { return }
+                var frame = window.frame
+                guard abs(frame.maxY - topY) > 0.5 else { return }
+                frame.origin.y = topY - frame.height
+                window.setFrameOrigin(frame.origin)
+            }
         }
     }
 }

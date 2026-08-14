@@ -49,7 +49,23 @@ final class AgentNotificationManager: NSObject, UNUserNotificationCenterDelegate
     private static let onlyWhenIdleKey = "notifyOnlyWhenIdle"
     static let soundKey = "notificationSound"
     private let jumpActionId = "MANAGERIE_JUMP"
+    private let dismissActionId = "MANAGERIE_DISMISS"
     private let categoryId = "MANAGERIE_AGENT_MESSAGE"
+
+    /// Tapping a notification activates Managerie, which would otherwise make
+    /// AppKit send `applicationShouldHandleReopen` and pop the main window
+    /// open. We stamp this when handling a notification so the reopen handler
+    /// can ignore that activation.
+    private static let reopenSuppressWindow: TimeInterval = 5
+    private static var suppressReopenUntil: Date?
+
+    /// True when the app was just activated by a notification interaction.
+    static var shouldSuppressReopen: Bool {
+        guard let until = suppressReopenUntil else { return false }
+        if Date() < until { return true }
+        suppressReopenUntil = nil
+        return false
+    }
 
     /// Defaults to true — notifications are the primary channel.
     static var notificationsEnabled: Bool {
@@ -132,11 +148,17 @@ final class AgentNotificationManager: NSObject, UNUserNotificationCenterDelegate
         let center = UNUserNotificationCenter.current()
         center.delegate = self
 
+        // Jump runs in the background: JumpHandler focuses the *agent's*
+        // terminal, so Managerie itself must never come forward.
         let jump = UNNotificationAction(
             identifier: jumpActionId,
             title: "Jump to Session",
-            options: [.foreground]
+            options: []
         )
+        // Exactly ONE custom action on purpose: macOS renders a single action
+        // as an inline button, but collapses two or more into an "Options"
+        // dropdown. The dismiss "cross" is the system's own Close button,
+        // drawn next to our Jump button on hover — no custom action needed.
         let category = UNNotificationCategory(
             identifier: categoryId,
             actions: [jump],
@@ -248,6 +270,16 @@ final class AgentNotificationManager: NSObject, UNUserNotificationCenterDelegate
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
+        // Any interaction may activate us — never let that open the main window.
+        Self.suppressReopenUntil = Date().addingTimeInterval(Self.reopenSuppressWindow)
+        DispatchQueue.main.async { AppDelegate.shared?.cancelPendingReopen() }
+
+        if response.actionIdentifier == dismissActionId {
+            debugLog("Managerie Notifications: dismissed")
+            completionHandler()
+            return
+        }
+
         let userInfo = response.notification.request.content.userInfo
         if let pid = userInfo["pid"] as? Int {
             debugLog("Managerie Notifications: jump requested for pid=\(pid)")
