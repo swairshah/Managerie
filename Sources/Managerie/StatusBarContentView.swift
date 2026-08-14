@@ -6,6 +6,7 @@ struct StatusBarContentView: View {
     @StateObject private var audioRecorder = AudioRecorder()
     @State private var recordingForSession: VoiceSession? = nil
     @State private var expandedSessionId: String? = nil
+    @State private var sessionsContentHeight: CGFloat = 0
 
     private static let relativeDateFormatter: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
@@ -206,7 +207,11 @@ struct StatusBarContentView: View {
             .frame(maxWidth: .infinity)
             .padding(.vertical, 22)
         } else {
-            // Trackie-style: constrained height + scroll keeps the panel compact
+            // Trackie-style: the MenuBarExtra panel measures its host view at
+            // content-size, where a ScrollView collapses to zero — it needs an
+            // explicit height. We measure the card stack's natural height via
+            // a preference key and clamp it, so short lists stay short and
+            // long ones scroll.
             ScrollView {
                 VStack(spacing: 4) {
                     ForEach(monitor.sessions) { session in
@@ -246,8 +251,14 @@ struct StatusBarContentView: View {
                     )
                     }
                 }
+                .background(
+                    GeometryReader { geo in
+                        Color.clear.preference(key: SessionsHeightKey.self, value: geo.size.height)
+                    }
+                )
             }
-            .frame(maxHeight: 520)
+            .onPreferenceChange(SessionsHeightKey.self) { sessionsContentHeight = $0 }
+            .frame(height: min(max(sessionsContentHeight, 52), 520))
         }
     }
 
@@ -482,6 +493,13 @@ private struct MenuSessionCard: View {
         guard !text.isEmpty else { return }
         onSend(text)
         draft = ""
+    }
+}
+
+private struct SessionsHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 
