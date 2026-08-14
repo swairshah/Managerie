@@ -74,6 +74,36 @@ final class AgentNotificationManager: NSObject, UNUserNotificationCenterDelegate
     /// debug binary (swift run) doesn't crash.
     private var available: Bool { Bundle.main.bundleIdentifier != nil }
 
+    // MARK: - Idle chime
+
+    /// The chime means "a session finished and is waiting for you" — it is
+    /// NOT played per message. Sessions with live status events chime on the
+    /// working→idle transition (AgentStatusStore); hook-based sessions chime
+    /// on message arrival since their hooks only fire at idle moments.
+    /// Debounced per session so e.g. claude-code's Stop + Notification hooks
+    /// firing together produce one ding.
+    private let chimeLock = NSLock()
+    private var lastChimeAt: [Int: Date] = [:]
+    private let chimeDebounce: TimeInterval = 8
+
+    func chimeForIdle(pid: Int?) {
+        guard Self.notificationsEnabled else { return }
+
+        let key = pid ?? -1
+        let now = Date()
+        chimeLock.lock()
+        if let last = lastChimeAt[key], now.timeIntervalSince(last) < chimeDebounce {
+            chimeLock.unlock()
+            return
+        }
+        lastChimeAt[key] = now
+        chimeLock.unlock()
+
+        DispatchQueue.main.async {
+            Self.notificationSound.play()
+        }
+    }
+
     func setup() {
         guard available else {
             debugLog("Managerie Notifications: no bundle identifier, notifications unavailable")
@@ -134,11 +164,14 @@ final class AgentNotificationManager: NSObject, UNUserNotificationCenterDelegate
             }
         }
 
-        // Chime via NSSound rather than UNNotificationContent.sound — system
-        // sound names aren't reliably resolvable by UN on macOS, and NSSound
-        // gives the settings picker instant preview with the same code path.
-        DispatchQueue.main.async {
-            Self.notificationSound.play()
+        // Chime only for sessions without live status tracking — their hooks
+        // (claude-code Stop/Notification, codex notify) fire exactly when the
+        // session goes idle. Status-tracked sessions (pi) chime on the
+        // working→idle status transition instead, so mid-turn messages and
+        // TTS chunks stay silent.
+        let hasLiveStatus = pid.map { AgentStatusStore.shared.hasAgent(pid: $0) } ?? false
+        if !hasLiveStatus {
+            chimeForIdle(pid: pid)
         }
     }
 

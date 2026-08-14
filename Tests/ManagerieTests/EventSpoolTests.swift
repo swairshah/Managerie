@@ -53,3 +53,40 @@ final class EventSpoolTests: XCTestCase {
         XCTAssertEqual(name, "1760000000123-4242-f00bar.json")
     }
 }
+
+// MARK: - Idle chime transition logic
+
+final class IdleTransitionTests: XCTestCase {
+
+    func testWorkingToDoneChimes() {
+        XCTAssertTrue(AgentStatusStore.isIdleTransition(from: "running", to: "done"))
+        XCTAssertTrue(AgentStatusStore.isIdleTransition(from: "thinking", to: "done"))
+        XCTAssertTrue(AgentStatusStore.isIdleTransition(from: "editing", to: "waiting"))
+        XCTAssertTrue(AgentStatusStore.isIdleTransition(from: "starting", to: "idle"))
+    }
+
+    func testIdleToIdleIsSilent() {
+        // Repeated done/waiting updates must not re-ding.
+        XCTAssertFalse(AgentStatusStore.isIdleTransition(from: "done", to: "done"))
+        XCTAssertFalse(AgentStatusStore.isIdleTransition(from: "waiting", to: "done"))
+        XCTAssertFalse(AgentStatusStore.isIdleTransition(from: "done", to: "waiting"))
+    }
+
+    func testActiveStatesAreSilent() {
+        // Going busy or staying busy never chimes.
+        XCTAssertFalse(AgentStatusStore.isIdleTransition(from: "done", to: "running"))
+        XCTAssertFalse(AgentStatusStore.isIdleTransition(from: "reading", to: "editing"))
+        XCTAssertFalse(AgentStatusStore.isIdleTransition(from: nil, to: "running"))
+    }
+
+    func testMidTurnToolErrorIsSilent() {
+        // "error" fires mid-turn (tool failure) — the agent keeps going.
+        XCTAssertFalse(AgentStatusStore.isIdleTransition(from: "running", to: "error"))
+    }
+
+    func testUnknownPreviousStateIsSilent() {
+        // App launched mid-session: first observed status is not a transition.
+        XCTAssertFalse(AgentStatusStore.isIdleTransition(from: nil, to: "done"))
+        XCTAssertFalse(AgentStatusStore.isIdleTransition(from: nil, to: "waiting"))
+    }
+}

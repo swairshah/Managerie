@@ -34,8 +34,23 @@ final class AgentStatusStore {
 
     private init() {}
 
+    /// Statuses that mean "the agent is finished and waiting for the user".
+    /// Note: "error" is NOT idle — tool errors fire mid-turn and the agent
+    /// keeps going.
+    static let idleStatuses: Set<String> = ["done", "waiting", "idle"]
+
+    /// Pure transition check: chime-worthy only when moving from an active
+    /// state into an idle one. Unknown previous state (app launched mid-turn)
+    /// is not a transition.
+    static func isIdleTransition(from previous: String?, to next: String) -> Bool {
+        guard idleStatuses.contains(next) else { return false }
+        guard let previous else { return false }
+        return !idleStatuses.contains(previous)
+    }
+
     func update(pid: Int, sourceApp: String?, sessionId: String?, project: String?, cwd: String?, status: String, detail: String?, contextPercent: Int?) {
         lock.lock()
+        let previousStatus = agents[pid]?.status
         agents[pid] = AgentStatus(
             pid: pid, sourceApp: sourceApp, sessionId: sessionId,
             project: project, cwd: cwd,
@@ -44,6 +59,20 @@ final class AgentStatusStore {
         )
         lock.unlock()
         NotificationCenter.default.post(name: .agentStatusChanged, object: nil)
+
+        // Sessions with live status tracking chime here — on the moment they
+        // go idle — not on message arrival.
+        if Self.isIdleTransition(from: previousStatus, to: status) {
+            AgentNotificationManager.shared.chimeForIdle(pid: pid)
+        }
+    }
+
+    /// Whether this pid reports live status events (pi extension sessions do;
+    /// hook-based sessions like claude-code/codex don't).
+    func hasAgent(pid: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return agents[pid] != nil
     }
 
     func remove(pid: Int) {

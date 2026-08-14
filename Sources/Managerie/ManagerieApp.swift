@@ -3148,7 +3148,7 @@ struct SettingsTabView: View {
                     }
 
                     if notificationsEnabled {
-                        SettingsRow("Notification Sound", subtitle: "Chime played when an agent message arrives") {
+                        SettingsRow("Notification Sound", subtitle: "Chime played when a session finishes and waits for you — not on every message") {
                             Picker("", selection: $notificationSoundRaw) {
                                 ForEach(NotificationSound.allCases, id: \.rawValue) { sound in
                                     Text(sound.rawValue).tag(sound.rawValue)
