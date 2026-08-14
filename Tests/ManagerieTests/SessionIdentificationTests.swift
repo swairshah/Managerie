@@ -452,3 +452,63 @@ final class SessionIdentificationScenarioTests: XCTestCase {
         XCTAssertEqual(SendHandler.parseTmuxPaneTarget(paneListing, ttyPath: tty!), "dev:1.0")
     }
 }
+
+// MARK: - Stable dropdown ordering
+
+final class StableOrderingTests: XCTestCase {
+
+    private func session(_ id: String, activity: VoiceActivity = .waiting, lastSpokenAt: Date? = nil) -> VoiceSession {
+        VoiceSession(
+            id: id, sourceApp: "pi", sessionId: nil, pid: nil,
+            activity: activity, statusDetail: nil, project: nil,
+            currentText: nil, queuedCount: 0, voice: nil,
+            lastSpokenAt: lastSpokenAt, lastSpokenText: nil,
+            cwd: nil, tty: nil, mux: nil
+        )
+    }
+
+    func testFirstAppearanceUsesIncomingOrder() {
+        var ranks: [String: Int] = [:]
+        var next = 0
+        let result = VoiceMonitor.stableOrder([session("a"), session("b"), session("c")], ranks: &ranks, nextRank: &next)
+        XCTAssertEqual(result.map(\.id), ["a", "b", "c"])
+    }
+
+    func testActivityChurnDoesNotReorder() {
+        var ranks: [String: Int] = [:]
+        var next = 0
+        _ = VoiceMonitor.stableOrder([session("a"), session("b"), session("c")], ranks: &ranks, nextRank: &next)
+
+        // Next rebuild: preference sort would put c first (it's "running" now)
+        // and b last — stable order must ignore that completely.
+        let churned = [
+            session("c", activity: .running, lastSpokenAt: Date()),
+            session("a", activity: .thinking),
+            session("b", activity: .idle),
+        ]
+        let result = VoiceMonitor.stableOrder(churned, ranks: &ranks, nextRank: &next)
+        XCTAssertEqual(result.map(\.id), ["a", "b", "c"])
+    }
+
+    func testNewSessionAppendsWithoutMovingOthers() {
+        var ranks: [String: Int] = [:]
+        var next = 0
+        _ = VoiceMonitor.stableOrder([session("a"), session("b")], ranks: &ranks, nextRank: &next)
+
+        // New session arrives at the front of the preference sort — it still
+        // gets a fresh rank after the existing ones.
+        let result = VoiceMonitor.stableOrder([session("new", activity: .running), session("b"), session("a")], ranks: &ranks, nextRank: &next)
+        XCTAssertEqual(result.map(\.id), ["a", "b", "new"])
+    }
+
+    func testReturningSessionKeepsItsOldSlot() {
+        var ranks: [String: Int] = [:]
+        var next = 0
+        _ = VoiceMonitor.stableOrder([session("a"), session("b"), session("c")], ranks: &ranks, nextRank: &next)
+        // b disappears for a rebuild…
+        _ = VoiceMonitor.stableOrder([session("a"), session("c")], ranks: &ranks, nextRank: &next)
+        // …and returns: it's back in the middle, not at the end.
+        let result = VoiceMonitor.stableOrder([session("c"), session("b"), session("a")], ranks: &ranks, nextRank: &next)
+        XCTAssertEqual(result.map(\.id), ["a", "b", "c"])
+    }
+}

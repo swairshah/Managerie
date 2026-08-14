@@ -206,6 +206,20 @@ final class VoiceMonitor: ObservableObject {
 
     // MARK: - Rebuild (replaces the old polling refresh)
 
+    // Stable dropdown ordering state — session id → fixed rank.
+    private var stableRanks: [String: Int] = [:]
+    private var nextStableRank = 0
+
+    /// Assign ranks to unseen sessions in their incoming (preference) order,
+    /// then sort everything by rank. Known sessions never move.
+    nonisolated static func stableOrder(_ sessions: [VoiceSession], ranks: inout [String: Int], nextRank: inout Int) -> [VoiceSession] {
+        for session in sessions where ranks[session.id] == nil {
+            ranks[session.id] = nextRank
+            nextRank += 1
+        }
+        return sessions.sorted { (ranks[$0.id] ?? .max) < (ranks[$1.id] ?? .max) }
+    }
+
     private func rebuild() {
         let entries = historyStore.entries
         let agents = AgentStatusStore.shared.allAgents()
@@ -233,16 +247,17 @@ final class VoiceMonitor: ObservableObject {
             activeSessionWindow: activeSessionWindow
         )
 
-        // Freeze UI order while mic is active
-        if isMicActive && !currentSessions.isEmpty {
-            let byId = Dictionary(uniqueKeysWithValues: newSessions.map { ($0.id, $0) })
-            var ordered = currentSessions.compactMap { byId[$0.id] }
-            for s in newSessions where !ordered.contains(where: { $0.id == s.id }) {
-                ordered.append(s)
-            }
-            sessions = ordered
-        } else {
-            sessions = newSessions
+        // Stable ordering: a session keeps its slot for its lifetime.
+        // buildSessions' preference sort only decides where a session enters
+        // the list the first time it's seen — after that, activity flips and
+        // recency updates never move it. (Replaces the old mic-active freeze,
+        // which is subsumed: the order simply never churns.)
+        sessions = Self.stableOrder(newSessions, ranks: &stableRanks, nextRank: &nextStableRank)
+
+        // Keep the rank map from growing without bound across very long runs.
+        if stableRanks.count > 300 {
+            let liveIds = Set(sessions.map(\.id))
+            stableRanks = stableRanks.filter { liveIds.contains($0.key) }
         }
 
         summary = Self.buildSummary(from: sessions)
