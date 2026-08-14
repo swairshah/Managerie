@@ -549,7 +549,7 @@ final class VoiceMonitor: ObservableObject {
 
         if total == 0 {
             color = "default"
-            label = "No Pi agents"
+            label = "No agents"
         } else if speaking > 0 {
             color = "red"
             label = speaking == 1 ? "Speaking" : "\(speaking) speaking"
@@ -600,22 +600,29 @@ final class VoiceMonitor: ObservableObject {
     /// Discover active pi sessions from extension-owned inbox directories.
     /// This avoids telemetry polling and gives us a stable fallback session list.
     private static func activeInboxPids() -> [Int] {
-        let inboxRoot = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".pi/agent/managerie-inbox", isDirectory: true)
+        // Scan both the Managerie inbox and the legacy pi-talk inbox so sessions
+        // still running the old extension show up too.
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let inboxRoots = [
+            home.appendingPathComponent(".pi/agent/managerie-inbox", isDirectory: true),
+            home.appendingPathComponent(".pi/agent/pitalk-inbox", isDirectory: true),
+        ]
 
-        guard let items = try? FileManager.default.contentsOfDirectory(
-            at: inboxRoot,
-            includingPropertiesForKeys: [.contentModificationDateKey],
-            options: [.skipsHiddenFiles]
-        ) else {
-            return []
+        let items = inboxRoots.flatMap { root in
+            (try? FileManager.default.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            )) ?? []
         }
 
         let now = Date()
         let maxAge: TimeInterval = 60 * 60 * 6  // ignore very stale crash leftovers
+        var seen = Set<Int>()
 
         return items.compactMap { url in
-            guard let pid = Int(url.lastPathComponent) else { return nil }
+            guard let pid = Int(url.lastPathComponent), !seen.contains(pid) else { return nil }
+            seen.insert(pid)
             let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
             if let modified = values?.contentModificationDate,
                now.timeIntervalSince(modified) > maxAge {

@@ -50,8 +50,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var settingsWindow: NSWindow?
     var speechCoordinator: SpeechPlaybackCoordinator?
     var localBroker: LocalSpeechBroker?
+    var legacyBroker: LocalSpeechBroker?
+    private var legacyBrokerRetryTimer: Timer?
     var micMonitor: MicrophoneActivityMonitor?
     let brokerPort = 18091
+    let legacyBrokerPort = 18081  // old PiTalk port (compat)
 
     // Dock icon visibility (defaults to true so window is accessible)
     var showDockIcon: Bool {
@@ -249,12 +252,38 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 print("Managerie: Failed to start health server: \(error)")
             }
         }
+
+        // Legacy compat: adopt the old PiTalk port (18081) so sessions still
+        // running the old pi-talk extension flow into Managerie. If the old
+        // PiTalk app holds the port, retry periodically — the moment it quits,
+        // Managerie takes over.
+        startLegacyBrokerIfAvailable()
+        if legacyBrokerRetryTimer == nil {
+            legacyBrokerRetryTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+                guard let self, self.localBroker != nil, self.legacyBroker == nil else { return }
+                self.startLegacyBrokerIfAvailable()
+            }
+        }
+    }
+
+    private func startLegacyBrokerIfAvailable() {
+        guard legacyBroker == nil, let coordinator = speechCoordinator else { return }
+        do {
+            let broker = try LocalSpeechBroker(port: legacyBrokerPort, coordinator: coordinator)
+            broker.start()
+            legacyBroker = broker
+            debugLog("Managerie: Legacy broker listening on 127.0.0.1:\(legacyBrokerPort) (pi-talk compat)")
+        } catch {
+            debugLog("Managerie: Legacy port \(legacyBrokerPort) unavailable (old PiTalk still running?)")
+        }
     }
 
     func stopLocalBroker() {
         debugLog("Managerie: stopLocalBroker called, localBroker=\(localBroker != nil)")
         localBroker?.stop()
         localBroker = nil
+        legacyBroker?.stop()
+        legacyBroker = nil
         healthServer?.stop()
         healthServer = nil
         debugLog("Managerie: Broker and health server stopped")
