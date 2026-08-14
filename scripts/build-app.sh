@@ -5,7 +5,7 @@ set -e
 cd "$(dirname "$0")/.."
 
 # Version - update this for releases
-VERSION="1.3.0"
+VERSION="1.0.0"
 
 echo "🔨 Building Managerie.app v$VERSION..."
 
@@ -32,7 +32,12 @@ if [ "$UNIVERSAL" = true ]; then
     echo "Building universal binary (arm64 + x86_64)..."
     swift build -c release --arch arm64 --arch x86_64 --product Managerie
     swift build -c release --arch arm64 --arch x86_64 --product mnote
-    BINARY_PATH=".build/apple/Products/Release"
+    # Universal output path moved across Swift toolchains
+    if [ -d ".build/apple/Products/Release" ]; then
+        BINARY_PATH=".build/apple/Products/Release"
+    else
+        BINARY_PATH=".build/out/Products/Release"
+    fi
 else
     echo "Building for current architecture..."
     swift build -c release --product Managerie
