@@ -1,6 +1,8 @@
 import Foundation
 
-/// Sends text to a pi session via file-based inbox (pi-messenger style)
+/// Sends text into agent sessions.
+/// - pi: file-based inbox picked up by the Managerie pi extension
+/// - claude-code / codex: tmux send-keys into the pane owning the agent's TTY
 final class SendHandler {
     
     struct SendResult {
@@ -14,20 +16,34 @@ final class SendHandler {
     /// sessions still running that extension receive messages too.
     private static let legacyInboxBaseDir = (NSHomeDirectory() as NSString).appendingPathComponent(".pi/agent/pitalk-inbox")
     
-    static func send(pid: Int?, tty: String?, mux: String?, text: String, completion: @escaping (SendResult) -> Void) {
+    static func send(pid: Int?, tty: String?, mux: String?, text: String, sourceApp: String? = nil, completion: @escaping (SendResult) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = performSend(pid: pid, text: text)
+            let result = performSend(pid: pid, tty: tty, sourceApp: sourceApp, text: text)
             DispatchQueue.main.async {
                 completion(result)
             }
         }
     }
-    
-    private static func performSend(pid: Int?, text: String) -> SendResult {
+
+    private static func performSend(pid: Int?, tty: String?, sourceApp: String?, text: String) -> SendResult {
         guard let pid = pid else {
             return SendResult(success: false, message: "No PID")
         }
-        
+
+        let app = (sourceApp ?? "pi").lowercased()
+
+        // Non-pi agents (claude-code, codex, …) have no inbox watcher —
+        // deliver via tmux send-keys instead.
+        if app != "pi" {
+            return sendViaTmux(pid: pid, tty: tty, text: text, sourceApp: app)
+        }
+
+        return sendViaInbox(pid: pid, text: text)
+    }
+
+    // MARK: - Pi inbox route
+
+    private static func sendViaInbox(pid: Int, text: String) -> SendResult {
         print("SendHandler: sending to PID \(pid) via inbox")
 
         let timestamp = Int(Date().timeIntervalSince1970 * 1000)
@@ -72,5 +88,93 @@ final class SendHandler {
             return SendResult(success: true, message: "Sent via inbox")
         }
         return SendResult(success: false, message: "Failed to write message: \(lastError ?? "unknown error")")
+    }
+
+    // MARK: - tmux route (claude-code / codex)
+
+    private static func sendViaTmux(pid: Int, tty: String?, text: String, sourceApp: String) -> SendResult {
+        let resolvedTty = normalizedTty(tty) ?? ttyForPid(pid)
+        guard let ttyName = resolvedTty else {
+            return SendResult(success: false, message: "No TTY for PID \(pid) — can't reach \(sourceApp)")
+        }
+
+        guard let tmux = tmuxBinary() else {
+            return SendResult(success: false, message: "tmux not found — replies to \(sourceApp) require the session to run inside tmux")
+        }
+
+        guard let target = tmuxTarget(forTty: ttyName, tmux: tmux) else {
+            return SendResult(success: false, message: "No tmux pane for \(sourceApp) (PID \(pid)) — run the session inside tmux to enable replies")
+        }
+
+        // Literal text and Enter must be separate send-keys invocations.
+        guard runProcess(tmux, ["send-keys", "-t", target, "-l", text]) != nil else {
+            return SendResult(success: false, message: "tmux send-keys failed")
+        }
+        usleep(80_000) // let the TUI ingest the text before Enter
+        guard runProcess(tmux, ["send-keys", "-t", target, "Enter"]) != nil else {
+            return SendResult(success: false, message: "tmux send-keys (Enter) failed")
+        }
+
+        print("SendHandler: sent to \(sourceApp) via tmux pane \(target)")
+        return SendResult(success: true, message: "Sent via tmux")
+    }
+
+    /// "ttys012", "/dev/ttys012" → "/dev/ttys012"; "??" → nil
+    private static func normalizedTty(_ tty: String?) -> String? {
+        guard var tty = tty?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !tty.isEmpty, tty != "??" else { return nil }
+        if !tty.hasPrefix("/dev/") { tty = "/dev/" + tty }
+        return tty
+    }
+
+    private static func ttyForPid(_ pid: Int) -> String? {
+        guard let out = runProcess("/bin/ps", ["-o", "tty=", "-p", "\(pid)"]) else { return nil }
+        return normalizedTty(out)
+    }
+
+    private static func tmuxBinary() -> String? {
+        let candidates = ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux"]
+        if let found = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
+            return found
+        }
+        // Fall back to PATH resolution
+        if let out = runProcess("/usr/bin/env", ["sh", "-c", "command -v tmux"]),
+           !out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return out.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return nil
+    }
+
+    private static func tmuxTarget(forTty ttyPath: String, tmux: String) -> String? {
+        guard let out = runProcess(tmux, ["list-panes", "-a", "-F", "#{session_name}:#{window_index}.#{pane_index} #{pane_tty}"]) else {
+            return nil
+        }
+        for line in out.components(separatedBy: "\n") {
+            let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
+            guard parts.count == 2 else { continue }
+            if parts[1] == ttyPath {
+                return parts[0]
+            }
+        }
+        return nil
+    }
+
+    @discardableResult
+    private static func runProcess(_ launchPath: String, _ arguments: [String]) -> String? {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: launchPath)
+        task.arguments = arguments
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+        do {
+            try task.run()
+        } catch {
+            return nil
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        guard task.terminationStatus == 0 else { return nil }
+        return String(data: data, encoding: .utf8) ?? ""
     }
 }

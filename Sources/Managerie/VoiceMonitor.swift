@@ -304,7 +304,7 @@ final class VoiceMonitor: ObservableObject {
             return
         }
         lastMessage = "Sending..."
-        SendHandler.send(pid: pid, tty: nil, mux: nil, text: text) { [weak self] result in
+        SendHandler.send(pid: pid, tty: session.tty, mux: session.mux, text: text, sourceApp: session.sourceApp) { [weak self] result in
             self?.lastMessage = result.message ?? (result.success ? "Sent" : "Failed")
             self?.rebuild()
         }
