@@ -152,7 +152,7 @@ struct StatusBarContentView: View {
                     .padding(.bottom, 8)
             }
         }
-        .frame(width: 350)
+        .frame(width: 360)
         .background(MenuWindowTopPin())
         .onAppear { monitor.start() }
     }
@@ -169,7 +169,7 @@ struct StatusBarContentView: View {
                 .foregroundStyle(.primary)
 
             Text("Managerie")
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: 15, weight: .semibold))
 
             Spacer()
 
@@ -206,12 +206,10 @@ struct StatusBarContentView: View {
             .frame(maxWidth: .infinity)
             .padding(.vertical, 22)
         } else {
-            let maxVisible = 8
-            let visibleSessions = Array(monitor.sessions.prefix(maxVisible))
-            let hiddenCount = monitor.sessions.count - visibleSessions.count
-
-            VStack(spacing: 7) {
-                ForEach(visibleSessions) { session in
+            // Trackie-style: constrained height + scroll keeps the panel compact
+            ScrollView {
+                VStack(spacing: 4) {
+                    ForEach(monitor.sessions) { session in
                     MenuSessionCard(
                         session: session,
                         title: sessionTitle(session),
@@ -246,19 +244,10 @@ struct StatusBarContentView: View {
                             recordingForSession = nil
                         }
                     )
-                }
-
-                if hiddenCount > 0 {
-                    Button(action: { openSettings() }) {
-                        Text("\(hiddenCount) more session\(hiddenCount == 1 ? "" : "s")…")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 5)
                     }
-                    .buttonStyle(.plain)
                 }
             }
+            .frame(maxHeight: 520)
         }
     }
 
@@ -359,22 +348,22 @@ private struct MenuSessionCard: View {
             // Card face: content (click to expand) + always-visible actions
             HStack(alignment: .center, spacing: 8) {
                 Button(action: onToggle) {
-                    VStack(alignment: .leading, spacing: 5) {
+                    VStack(alignment: .leading, spacing: 4) {
                         Text(title)
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(.system(size: 15, weight: .semibold))
                             .foregroundStyle(.primary)
                             .lineLimit(1)
 
                         if let message = lastMessage?.trimmingCharacters(in: .whitespacesAndNewlines), !message.isEmpty {
                             Text(message.replacingOccurrences(of: "\n", with: " "))
-                                .font(.system(size: 12))
+                                .font(.system(size: 13))
                                 .foregroundStyle(.secondary)
                                 .lineLimit(isExpanded ? 6 : 2)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .multilineTextAlignment(.leading)
                         } else if let detail = session.statusDetail, !detail.isEmpty {
                             Text(detail)
-                                .font(.system(size: 12))
+                                .font(.system(size: 13))
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         }
@@ -390,7 +379,7 @@ private struct MenuSessionCard: View {
 
                             if let lastAt = session.lastSpokenAt {
                                 Text(relativeFormatter.localizedString(for: lastAt, relativeTo: Date()))
-                                    .font(.system(size: 10.5))
+                                    .font(.system(size: 11))
                                     .foregroundStyle(.tertiary)
                             }
                         }
@@ -482,8 +471,8 @@ private struct MenuSessionCard: View {
             }
         }
         .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color.primary.opacity(isExpanded ? 0.075 : (isHovering ? 0.075 : 0.05)))
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.primary.opacity(isExpanded || isHovering ? 0.08 : 0.035))
         )
         .onHover { isHovering = $0 }
     }
@@ -503,12 +492,12 @@ private struct TagPill: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: 10.5, weight: .medium))
+            .font(.system(size: 10))
             .foregroundStyle(.secondary)
             .lineLimit(1)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2.5)
-            .background(Capsule().fill(Color.primary.opacity(0.08)))
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(Capsule().fill(Color.primary.opacity(0.07)))
     }
 }
 
