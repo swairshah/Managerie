@@ -42,6 +42,7 @@ There are no tests or linter configured.
 
 - **AgentStatusStore** (`AgentStatusStore.swift`) — Singleton, thread-safe store for real-time agent status events received from the managerie extension via the broker. Replaces telemetry file polling.
 - **VoiceMonitor** (`VoiceMonitor.swift`) — `@MainActor ObservableObject`, push/event-driven via `AgentStatusStore` + `RequestHistoryStore` publishers (no polling timer), drives the UI
+- **IntegrationsManager** (`IntegrationsManager.swift`) — installs/removes agent integrations: pi (writes `~/.pi/agent/extensions/managerie.ts`, which pi auto-loads), claude-code (hooks in `~/.claude/settings.json`), codex (lifecycle hooks in `~/.codex/hooks.json`). Never shells out to a CLI, so it works from a GUI app with no nvm/node PATH. Runs automatically at launch via `autoInstallIfNeeded()` for agents the user has; explicit removal sets a sticky `integrationOptOut.<agent>` flag so a launch never reinstalls it. Paths are injectable (`init(home:)`) for tests
 - **JumpHandler** (`JumpHandler.swift`) — Focuses terminal windows for a PID. Supports Ghostty (CGWindowList + Accessibility API), iTerm2/Terminal (AppleScript), tmux/zellij detection
 - **SendHandler** (`SendHandler.swift`) — Sends text to terminal sessions via tmux `send-keys`, zellij `write-chars`, or Ghostty keystrokes
 - **TTSClient** (`ManagerieClient/TTSClient.swift`) — HTTP client for TTS server (legacy local TTS voice names, not the current ElevenLabs voices)

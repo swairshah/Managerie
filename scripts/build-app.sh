@@ -28,6 +28,14 @@ for arg in "$@"; do
     esac
 done
 
+# The app ships the pi extension as a bundled resource and writes it straight
+# into ~/.pi/agent/extensions. Keep it in lockstep with the npm source so a
+# release can't ship a stale extension.
+if ! cmp -s Extensions/managerie/index.ts Sources/Managerie/Resources/managerie-extension.ts; then
+    echo "Syncing bundled pi extension from Extensions/managerie/index.ts..."
+    cp Extensions/managerie/index.ts Sources/Managerie/Resources/managerie-extension.ts
+fi
+
 if [ "$UNIVERSAL" = true ]; then
     echo "Building universal binary (arm64 + x86_64)..."
     swift build -c release --arch arm64 --arch x86_64 --product Managerie

@@ -96,6 +96,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Set shared instance for access from SwiftUI
         AppDelegate.shared = self
 
+        // Connect every coding agent the user has (pi, claude-code, codex) so
+        // a fresh install works with no manual setup. Idempotent, and skips
+        // integrations the user explicitly removed in Settings > Integrations.
+        DispatchQueue.global(qos: .utility).async {
+            IntegrationsManager.shared.autoInstallIfNeeded()
+        }
+
         switch ElevenLabsApiKeyManager.bootstrapPersistedKeyIfNeeded() {
         case .importedFromEnvironment:
             debugLog("Managerie: Imported ElevenLabs API key from process environment")

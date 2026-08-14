@@ -4,7 +4,8 @@
 Usage:
   managerie-hook.py claude-stop          Claude Code Stop hook (JSON on stdin)
   managerie-hook.py claude-notification  Claude Code Notification hook (JSON on stdin)
-  managerie-hook.py codex [json]         Codex notify program (JSON as final arg)
+  managerie-hook.py codex-hook           Codex lifecycle hook (JSON on stdin, ~/.codex/hooks.json)
+  managerie-hook.py codex [json]         Codex notify program (JSON as final arg, legacy)
 
 Drops NDJSON `speak` events into Managerie's file spool
 (~/.pi/agent/managerie/events/) — no ports, no sockets. Managerie watches the
@@ -93,6 +94,35 @@ def claude_notification():
     })
 
 
+def codex_hook():
+    """Codex >= 0.14x lifecycle hook (hooks.json). JSON arrives on stdin with
+    `hook_event_name`; the Stop payload carries the final assistant message.
+
+    Unlike the legacy `notify` program (a single-value TOML key), hooks are a
+    list per event, so Managerie coexists with other Codex tooling.
+    """
+    try:
+        data = json.load(sys.stdin)
+    except Exception:
+        return
+
+    event = data.get("hook_event_name", "")
+    if event == "Stop":
+        text = data.get("last_assistant_message") or "Codex finished a turn"
+    elif event == "StopFailure":
+        text = data.get("error") or data.get("message") or "Codex turn ended with an error"
+    else:
+        return  # only notify at turn end
+
+    send({
+        "type": "speak",
+        "text": clip(text),
+        "sourceApp": "codex",
+        "sessionId": str(data.get("session_id") or "") or None,
+        "pid": os.getppid(),
+    })
+
+
 def codex():
     payload = {}
     if len(sys.argv) > 2:
@@ -118,6 +148,7 @@ def main():
     handler = {
         "claude-stop": claude_stop,
         "claude-notification": claude_notification,
+        "codex-hook": codex_hook,
         "codex": codex,
     }.get(mode)
     if handler:
