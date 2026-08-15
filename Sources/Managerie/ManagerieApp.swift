@@ -909,15 +909,7 @@ struct SessionRowView: View {
 
     /// Last message this session produced, straight from persisted history.
     private var historyMessage: String? {
-        if let pid = session.pid,
-           let entry = monitor.recentHistory.first(where: { $0.pid == pid }) {
-            return entry.text
-        }
-        if let sid = session.sessionId,
-           let entry = monitor.recentHistory.first(where: { $0.sessionId == sid }) {
-            return entry.text
-        }
-        return nil
+        monitor.lastHistoryMessage(for: session)
     }
 
     var body: some View {

@@ -107,6 +107,20 @@ final class VoiceMonitor: ObservableObject {
     @Published private(set) var lastMessage: String?
     @Published private(set) var recentHistory: [RequestHistoryEntry] = []
 
+    /// Last message each session produced, from the *whole* history rather
+    /// than the recent-ten window: one chatty agent used to fill that window
+    /// and every other row lost its message text (notably right after launch,
+    /// when live status text hasn't arrived yet).
+    @Published private(set) var lastMessageByPid: [Int: String] = [:]
+    @Published private(set) var lastMessageBySessionId: [String: String] = [:]
+
+    /// Newest message recorded for this session, if any.
+    func lastHistoryMessage(for session: VoiceSession) -> String? {
+        if let pid = session.pid, let text = lastMessageByPid[pid] { return text }
+        if let sid = session.sessionId, let text = lastMessageBySessionId[sid] { return text }
+        return nil
+    }
+
     private var cancellables = Set<AnyCancellable>()
     private var statusObserver: NSObjectProtocol?
     private var micObserver: NSObjectProtocol?
@@ -241,8 +255,21 @@ final class VoiceMonitor: ObservableObject {
         }
 
         summary = Self.buildSummary(from: sessions)
-        recentHistory = Array(entries.filter { !$0.status.isInQueue }
-            .sorted { $0.timestamp > $1.timestamp }.prefix(10))
+        let delivered = entries.filter { !$0.status.isInQueue }
+            .sorted { $0.timestamp > $1.timestamp }
+        recentHistory = Array(delivered.prefix(10))
+
+        // Newest-first walk, so the first hit per key is the latest message.
+        var byPid: [Int: String] = [:]
+        var bySession: [String: String] = [:]
+        for entry in delivered {
+            let text = entry.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+            if let pid = entry.pid, byPid[pid] == nil { byPid[pid] = text }
+            if let sid = entry.sessionId, bySession[sid] == nil { bySession[sid] = text }
+        }
+        lastMessageByPid = byPid
+        lastMessageBySessionId = bySession
         checkServerHealth()
     }
 

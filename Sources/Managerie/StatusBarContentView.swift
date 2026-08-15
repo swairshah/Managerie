@@ -102,17 +102,7 @@ struct StatusBarContentView: View {
     /// Most recent message text for a session, straight from history (works
     /// even when live status events aren't flowing yet).
     private func historyMessage(for session: VoiceSession) -> String? {
-        if let pid = session.pid {
-            if let entry = monitor.recentHistory.first(where: { $0.pid == pid }) {
-                return entry.text
-            }
-        }
-        if let sid = session.sessionId {
-            if let entry = monitor.recentHistory.first(where: { $0.sessionId == sid }) {
-                return entry.text
-            }
-        }
-        return nil
+        monitor.lastHistoryMessage(for: session)
     }
 
     // MARK: - Body
